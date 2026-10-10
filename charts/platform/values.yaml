@@ -1,0 +1,16 @@
+# The chart is scaffold-only. Component subcharts and workloads will be added
+# in implementation milestones; never place credentials in committed values.
+global:
+  environment: local
+
+wordpress:
+  enabled: false
+
+woocommerceMcp:
+  enabled: false
+
+gateway:
+  enabled: false
+
+dashboard:
+  enabled: false

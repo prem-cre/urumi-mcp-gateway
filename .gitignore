@@ -1,0 +1,14 @@
+# Local credentials and generated configuration
+.env
+.env.*
+!.env.example
+secrets*.yaml
+values-local-secret*.yaml
+
+# Build and editor output
+node_modules/
+dist/
+coverage/
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,7 @@
+global:
+  environment: local
+
+# Intended local defaults to be completed with the first working chart:
+# - Kind/k3d/Minikube ingress hostnames
+# - local storage class
+# - development image tags

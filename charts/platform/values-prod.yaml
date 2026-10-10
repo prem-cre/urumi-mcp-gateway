@@ -1,0 +1,5 @@
+global:
+  environment: production
+
+# Supply domain, ingress TLS, storage class, image references and Secret names
+# at deploy time. Do not commit secret values in this file.
