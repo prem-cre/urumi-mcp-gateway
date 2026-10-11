@@ -1,0 +1,18 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: urumi
+servers: 1
+agents: 1
+image: rancher/k3s:v1.35.5-k3s1
+ports:
+  - port: 8080:80
+    nodeFilters:
+      - loadbalancer
+  - port: 8443:443
+    nodeFilters:
+      - loadbalancer
+volumes:
+  - volume: ${URUMI_DATA_DIR}:/var/lib/rancher/k3s/storage
+    nodeFilters:
+      - agent:0

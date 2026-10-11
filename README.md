@@ -1,41 +1,64 @@
 # Urumi MCP Gateway
 
-A Kubernetes-hosted team MCP gateway for WooCommerce and other upstream MCP servers. This repository is being built for the Urumi AI FDE Internship Round 1 assignment.
+A Python team MCP gateway with a React dashboard, a tool-using chat agent and a Kubernetes-hosted WooCommerce store. Built for the Urumi AI FDE Internship assessment.
 
-## Project status
+## Current status
 
-Initial repository setup only. The application services and deployable Helm charts are not implemented yet. The first milestone is the required single-store flow; optional multi-store provisioning comes only after that works end to end.
+The repository/system design and Kubernetes store foundation are implemented. The store uses WordPress + WooCommerce, MariaDB and persistent content/database volumes. PostgreSQL is deployed for the upcoming gateway. Helm defines local and production-like values, probes, resources, ingress and network boundaries.
 
-## Planned components
+The Python gateway, WooCommerce MCP server, team dashboard and chat are the next phases. They are not available yet. The production values are a deployment configuration, not evidence of a live VPS deployment.
 
-| Component | Responsibility | Network exposure |
-| --- | --- | --- |
-| WooCommerce | WordPress storefront, admin and persistent store data | Ingress |
-| WooCommerce MCP | Tools for products and orders, backed by the WooCommerce REST API | Cluster internal; gateway only |
-| Gateway API | Team authentication, upstream registry, MCP aggregation/routing, audit log and chat tool loop | Dashboard/API ingress |
-| Dashboard | Admin and member workflows, server health, tools, audit log and chat | Ingress |
+## Start locally
 
-The gateway is the only client of upstream MCP servers. Upstream credentials stay server-side, and client API keys are hashed at rest.
+Prerequisites: running Docker Desktop, k3d, kubectl, Helm and uv.
 
-## Repository layout
-
-```text
-charts/                 Helm charts and environment-specific values
-  platform/             Umbrella chart for the assignment stack
-docs/                   Architecture, threat model and deployment notes
+```sh
+brew install helm k3d
+uv python install 3.12
+uv sync --locked
+./scripts/local-up.sh
+export KUBECONFIG="$PWD/.local/kubeconfig"
+kubectl -n urumi get pods,pvc,ingress
 ```
 
-## Intended local setup
+- Store: **http://store.localhost:8080/**
+- WordPress admin: **http://store.localhost:8080/wp-admin/**
+- Admin credentials: ignored, private `.local/credentials.json`.
 
-Target: Kind, k3d or Minikube with Helm and an ingress controller. Local hostnames will be documented once the chart and ingress configuration are implemented. No credentials or secrets belong in this repository; use Kubernetes Secrets or an ignored local environment file.
+The initialization Job installs pinned WooCommerce, creates a demo notebook, enables free shipping and cash on delivery, and can be rerun. Follow [deployment instructions](docs/deployment.md) to place a real demo order and inspect it in admin. This is a development store with dummy data and no real payments.
 
-## Delivery milestones
+```sh
+# Verify the storefront and visitor cart:
+uv run python scripts/verify-store.py
+# Explicitly create a real demo order through WooCommerce visitor checkout:
+uv run python scripts/verify-store.py --checkout
+```
 
-1. Run one WooCommerce store and its database with persistent storage on local Kubernetes.
-2. Implement the WooCommerce MCP server and verify product and order tools.
-3. Implement gateway authentication, tool discovery/routing, three upstreams, audit logs and server health.
-4. Add the dashboard, role controls and chat tool loop.
-5. Demonstrate the required two-user flow, key revocation, upstream disablement and failure isolation.
-6. Document a production-like k3s deployment using the same Helm charts with different values.
+No LLM key or external account is needed for this phase. Credentials are generated separately from Helm; never commit `.local`, `.env`, kubeconfigs or Secrets.
 
-See the assignment brief for the authoritative requirements and demo checklist.
+## Design and decisions
+
+- [System design](docs/architecture.md): gateway flow, sessions, tool aggregation, permissions, audit, failure handling and scaling.
+- [Architecture decision record](docs/decisions/001-foundation.md): Python, database split, k3d/k3s, secrets and scope.
+- [Scope and demo checklist](docs/scope.md): required features and implementation sequence.
+- [Threat model](docs/threat-model.md): implemented boundaries, planned controls and current limitations.
+- [Local/VPS setup and rollback](docs/deployment.md): same chart with environment values; backup requirements.
+- [Foundation verification](docs/verification.md): evidence collected from the running cluster.
+
+## Layout
+
+```text
+apps/dashboard/             React dashboard boundary (implementation follows)
+services/gateway/           Python gateway/auth/audit/chat boundary
+services/woocommerce_mcp/    Own WooCommerce MCP server boundary
+charts/platform/            Helm chart, local/prod values and Kubernetes templates
+infra/local/                Dedicated k3d cluster configuration
+scripts/                    Secrets, deployment and visitor checkout verification
+docs/                       Design, decisions, scope, security and evidence
+```
+
+## Planned end-to-end behavior
+
+An admin connects three upstream MCP servers once. Two users reach them through a single gateway endpoint or the dashboard chat. API keys are hashed and revocable; upstream credentials stay server-side. Every tool call follows the same authorization and audit path. Disabled servers disappear from discovery and a dead upstream does not prevent calls to healthy servers.
+
+External MCP client setup and dashboard chat instructions will be added when those services work. Optional multi-store provisioning starts only after the mandatory two-user flow passes.

@@ -1,5 +1,11 @@
+# Replace the example host and supply real Secrets before using this configuration.
+# k3s defaults to local-path. A single-node PVC is persistent but is not HA storage.
 global:
   environment: production
-
-# Supply domain, ingress TLS, storage class, image references and Secret names
-# at deploy time. Do not commit secret values in this file.
+  storageClass: local-path
+store:
+  host: store.example.com
+  url: https://store.example.com
+  ingress:
+    className: traefik
+    tlsSecretName: urumi-store-tls

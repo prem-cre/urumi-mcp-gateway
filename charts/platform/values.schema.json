@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["global", "store", "gatewayDatabase", "networkPolicy"],
+  "properties": {
+    "global": {
+      "type": "object", "required": ["environment", "storageClass"],
+      "properties": {
+        "environment": {"enum": ["local", "production"]},
+        "storageClass": {"type": "string", "minLength": 1}
+      }
+    },
+    "store": {
+      "type": "object", "required": ["host", "url", "existingSecret", "wordpress", "database", "bootstrap"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "url": {"type": "string", "pattern": "^https?://"},
+        "existingSecret": {"type": "string", "minLength": 1},
+        "wordpress": {"$ref": "#/definitions/workload"},
+        "database": {"$ref": "#/definitions/workload"},
+        "bootstrap": {
+          "type": "object", "required": ["enabled", "image", "woocommerceVersion", "resources"],
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "image": {"type": "string", "minLength": 1},
+            "woocommerceVersion": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"}
+          }
+        }
+      }
+    },
+    "gatewayDatabase": {"$ref": "#/definitions/workload"},
+    "networkPolicy": {
+      "type": "object", "required": ["enabled"],
+      "properties": {"enabled": {"type": "boolean"}}
+    }
+  },
+  "definitions": {
+    "workload": {
+      "type": "object", "required": ["image", "storage", "resources"],
+      "properties": {
+        "image": {"type": "string", "minLength": 1},
+        "storage": {"type": "string", "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"},
+        "resources": {"type": "object", "required": ["requests", "limits"]}
+      }
+    }
+  }
+}

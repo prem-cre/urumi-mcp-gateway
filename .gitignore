@@ -12,3 +12,12 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+
+# Python and local cluster artifacts
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.local/
+*.kubeconfig

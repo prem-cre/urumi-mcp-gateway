@@ -1,0 +1,139 @@
+{{- if .Values.store.bootstrap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-store-bootstrap
+# This is development seed data, never credentials.
+data:
+  htaccess: |
+    # BEGIN WordPress
+    <IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+    RewriteBase /
+    RewriteRule ^index\.php$ - [L]
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule . /index.php [L]
+    </IfModule>
+    # END WordPress
+  seed.php: |
+    <?php
+    WC_Install::create_pages();
+    update_option('show_on_front', 'page');
+    update_option('page_on_front', (int) get_option('woocommerce_shop_page_id'));
+    update_option('woocommerce_store_address', 'Demo street');
+    update_option('woocommerce_store_city', 'Bangalore');
+    update_option('woocommerce_store_postcode', '560001');
+    update_option('woocommerce_default_country', 'IN:KA');
+    update_option('woocommerce_currency', 'INR');
+    update_option('timezone_string', 'Asia/Kolkata');
+    update_option('woocommerce_enable_guest_checkout', 'yes');
+    update_option('woocommerce_cod_settings', [
+      'enabled' => 'yes', 'title' => 'Cash on delivery',
+      'description' => 'Demo checkout: no real payment is taken.',
+      'instructions' => 'Assessment demonstration order.',
+      'enable_for_virtual' => 'yes',
+    ]);
+    $zone = new WC_Shipping_Zone(0);
+    $methods = $zone->get_shipping_methods();
+    if (!$methods) {
+      $instance = $zone->add_shipping_method('free_shipping');
+      update_option('woocommerce_free_shipping_' . $instance . '_settings', [
+        'enabled' => 'yes', 'title' => 'Free demo shipping', 'requires' => '',
+      ]);
+    }
+    if (!wc_get_product_id_by_sku('URUMI-DEMO-001')) {
+      $p = new WC_Product_Simple();
+      $p->set_name('Urumi Demo Notebook');
+      $p->set_sku('URUMI-DEMO-001');
+      $p->set_regular_price('299.00');
+      $p->set_description('Seed product for the assessment checkout flow.');
+      $p->set_status('publish');
+      $p->save();
+    }
+    update_option('woocommerce_onboarding_profile', ['completed' => true]);
+    flush_rewrite_rules();
+    echo "Store seeded (safe to run again).\n";
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-bootstrap-{{ .Release.Revision }}
+  labels:
+    {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels: {app: bootstrap, instance: {{ .Release.Name }}}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 33
+        runAsGroup: 33
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bootstrap
+          image: {{ .Values.store.bootstrap.image | quote }}
+          workingDir: /var/www/html
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: HOME, value: /tmp}
+            - {name: WORDPRESS_DB_HOST, value: {{ printf "%s-mariadb" .Release.Name | quote }}}
+            - {name: WORDPRESS_DB_NAME, value: wordpress}
+            - {name: WORDPRESS_DB_USER, value: wordpress}
+            - {name: STORE_URL, value: {{ .Values.store.url | quote }}}
+            - {name: STORE_TITLE, value: {{ .Values.store.title | quote }}}
+            - {name: WC_VERSION, value: {{ .Values.store.bootstrap.woocommerceVersion | quote }}}
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.existingSecret }}, key: database-password}}
+            - name: WP_ADMIN_USER
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.existingSecret }}, key: admin-user}}
+            - name: WP_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.existingSecret }}, key: admin-password}}
+            - name: WP_ADMIN_EMAIL
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.existingSecret }}, key: admin-email}}
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              n=0
+              until [ -f wp-config.php ] && wp db check --quiet; do
+                n=$((n + 1)); [ "$n" -lt 90 ] || exit 1; sleep 5
+              done
+              if ! wp core is-installed; then
+                wp core install --url="$STORE_URL" --title="$STORE_TITLE" \
+                  --admin_user="$WP_ADMIN_USER" --admin_password="$WP_ADMIN_PASSWORD" \
+                  --admin_email="$WP_ADMIN_EMAIL" --skip-email
+              fi
+              wp option update home "$STORE_URL"
+              wp option update siteurl "$STORE_URL"
+              wp rewrite structure '/%postname%/'
+              cp /bootstrap/htaccess /var/www/html/.htaccess
+              if ! wp plugin is-installed woocommerce; then
+                wp plugin install woocommerce --version="$WC_VERSION" --activate
+              else
+                actual=$(wp plugin get woocommerce --field=version)
+                if [ "$actual" != "$WC_VERSION" ]; then
+                  echo "WooCommerce version differs from pinned version; explicit upgrade required." >&2
+                  exit 1
+                fi
+                wp plugin activate woocommerce
+              fi
+              wp eval-file /bootstrap/seed.php
+          resources:
+            {{- toYaml .Values.store.bootstrap.resources | nindent 12 }}
+          volumeMounts:
+            - {name: content, mountPath: /var/www/html}
+            - {name: bootstrap, mountPath: /bootstrap, readOnly: true}
+      volumes:
+        - name: content
+          persistentVolumeClaim: {claimName: {{ .Release.Name }}-wordpress}
+        - name: bootstrap
+          configMap: {name: {{ .Release.Name }}-store-bootstrap}
+{{- end }}

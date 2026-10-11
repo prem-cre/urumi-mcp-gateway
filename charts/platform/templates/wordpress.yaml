@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-wordpress
+  labels:
+    {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.global.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ .Values.store.wordpress.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-wordpress
+  labels:
+    {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: wordpress, instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: wordpress, instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: wordpress
+          image: {{ .Values.store.wordpress.image | quote }}
+          ports: [{name: http, containerPort: 80}]
+          env:
+            - {name: WORDPRESS_DB_HOST, value: {{ printf "%s-mariadb" .Release.Name | quote }}}
+            - {name: WORDPRESS_DB_NAME, value: wordpress}
+            - {name: WORDPRESS_DB_USER, value: wordpress}
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.existingSecret }}, key: database-password}}
+            - name: WORDPRESS_CONFIG_EXTRA
+              value: |
+                define('DISALLOW_FILE_EDIT', true);
+                define('WP_MEMORY_LIMIT', '256M');
+                define('WP_AUTO_UPDATE_CORE', false);
+          resources:
+            {{- toYaml .Values.store.wordpress.resources | nindent 12 }}
+          startupProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /wp-login.php, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 15
+            timeoutSeconds: 3
+          volumeMounts: [{name: content, mountPath: /var/www/html}]
+      volumes:
+        - name: content
+          persistentVolumeClaim: {claimName: {{ .Release.Name }}-wordpress}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-wordpress
+spec:
+  selector: {app: wordpress, instance: {{ .Release.Name }}}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-store
+spec:
+  ingressClassName: {{ .Values.store.ingress.className }}
+  {{- if .Values.store.ingress.tlsSecretName }}
+  tls:
+    - hosts: [{{ .Values.store.host | quote }}]
+      secretName: {{ .Values.store.ingress.tlsSecretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.store.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-wordpress
+                port: {name: http}

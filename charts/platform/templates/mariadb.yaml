@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-mariadb
+spec:
+  clusterIP: None
+  selector: {app: mariadb, instance: {{ .Release.Name }}}
+  ports: [{name: mysql, port: 3306, targetPort: mysql}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-mariadb
+spec:
+  serviceName: {{ .Release.Name }}-mariadb
+  replicas: 1
+  selector:
+    matchLabels: {app: mariadb, instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: mariadb, instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: mariadb
+          image: {{ .Values.store.database.image | quote }}
+          env:
+            - {name: MARIADB_DATABASE, value: wordpress}
+            - {name: MARIADB_USER, value: wordpress}
+            - name: MARIADB_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.existingSecret }}, key: database-password}}
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.store.existingSecret }}, key: database-root-password}}
+          ports: [{name: mysql, containerPort: 3306}]
+          resources:
+            {{- toYaml .Values.store.database.resources | nindent 12 }}
+          startupProbe:
+            exec: {command: [healthcheck.sh, --connect, --innodb_initialized]}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec: {command: [healthcheck.sh, --connect, --innodb_initialized]}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec: {command: [healthcheck.sh, --connect]}
+            periodSeconds: 15
+            timeoutSeconds: 5
+          volumeMounts: [{name: data, mountPath: /var/lib/mysql}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ .Values.global.storageClass | quote }}
+        resources:
+          requests: {storage: {{ .Values.store.database.storage }}}

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: urumi-mcp-gateway
-description: Umbrella Helm chart for the Urumi MCP Gateway assignment stack
+description: WooCommerce store and gateway database; Python services follow in later phases
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"

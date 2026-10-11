@@ -1,0 +1,58 @@
+{{- if .Values.gatewayDatabase.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-postgres
+spec:
+  clusterIP: None
+  selector: {app: postgres, instance: {{ .Release.Name }}}
+  ports: [{name: postgres, port: 5432, targetPort: postgres}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}-postgres
+spec:
+  serviceName: {{ .Release.Name }}-postgres
+  replicas: 1
+  selector:
+    matchLabels: {app: postgres, instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: postgres, instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: postgres
+          image: {{ .Values.gatewayDatabase.image | quote }}
+          env:
+            - {name: POSTGRES_DB, value: gateway}
+            - {name: POSTGRES_USER, value: gateway}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - name: POSTGRES_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.gatewayDatabase.existingSecret }}, key: password}}
+          ports: [{name: postgres, containerPort: 5432}]
+          resources:
+            {{- toYaml .Values.gatewayDatabase.resources | nindent 12 }}
+          startupProbe:
+            exec: {command: [pg_isready, -U, gateway, -d, gateway]}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec: {command: [pg_isready, -U, gateway, -d, gateway]}
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec: {command: [pg_isready, -U, gateway, -d, gateway]}
+            periodSeconds: 15
+            timeoutSeconds: 5
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ .Values.global.storageClass | quote }}
+        resources:
+          requests: {storage: {{ .Values.gatewayDatabase.storage }}}
+{{- end }}
