@@ -29,7 +29,7 @@ Read admin username/password from `.local/credentials.json` privately. Do not pa
 2. Proceed to checkout, enter dummy billing/shipping details, select Cash on delivery and place the order.
 3. Open WooCommerce admin > Orders with the local admin credentials. Confirm the item, total and order status.
 
-The checkout page and admin are real WooCommerce, not gateway mock data. A purchase creates an order in MariaDB. The gateway services and dashboard do not run yet.
+The checkout page and admin are real WooCommerce, not gateway mock data. A purchase creates an order in MariaDB. The gateway services and dashboard do not run yet. Outgoing email is not configured; use WooCommerce admin to inspect orders.
 
 ## What is installed
 

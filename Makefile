@@ -1,4 +1,4 @@
-.PHONY: setup up status check verify checkout
+.PHONY: setup up status check verify checkout isolation
 
 setup:
 	uv python install 3.12
@@ -23,3 +23,6 @@ verify:
 # Creates an actual COD test order with dummy buyer data.
 checkout:
 	uv run python scripts/verify-store.py --checkout
+
+isolation:
+	./scripts/verify-network.sh
