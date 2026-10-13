@@ -1,13 +1,13 @@
 # Scope and acceptance checklist
 
-Phase A (repository and system design) plus phase B (store foundation) are the current task. Later phases implement the Python services and dashboard.
+Repository/system design, store foundation, and the own WooCommerce MCP adapter are implemented. The dashboard has a demo frontend. Next: gateway aggregation, access/audits, then live chat integration.
 
 | Requirement | Implementation milestone |
 | --- | --- |
 | Local Kubernetes + same Helm charts for VPS | current foundation |
 | Persistent WordPress and database, Ingress, probes, limits, Secrets | current foundation |
 | Storefront purchase and admin order visibility | current foundation verification |
-| Own WooCommerce MCP: five required tools, Streamable HTTP, internal only | next: MCP |
+| Own WooCommerce MCP: five required tools, Streamable HTTP, internal only | implemented; see services/woocommerce_mcp/README.md |
 | Registry CRUD, three upstreams, collision handling, timeouts | gateway |
 | Admin/member, invitations, per-user hashed/revocable keys | access |
 | Every tool call audited with right identity | access + gateway |

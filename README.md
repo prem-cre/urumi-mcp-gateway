@@ -6,7 +6,7 @@ A Python team MCP gateway with a React dashboard, a tool-using chat agent and a 
 
 The repository/system design and Kubernetes store foundation are implemented. The store uses WordPress + WooCommerce, MariaDB and persistent content/database volumes. PostgreSQL is deployed for the upcoming gateway. Helm defines local and production-like values, probes, resources, ingress and network boundaries.
 
-The Python gateway, WooCommerce MCP server, team dashboard and chat are the next phases. They are not available yet. The production values are a deployment configuration, not evidence of a live VPS deployment.
+The Python WooCommerce MCP server is implemented with five tools and an internal-only Helm workload. The React dashboard is a local demo frontend. The gateway and live team/chat workflows are the next phases. The production values are a deployment configuration, not evidence of a live VPS deployment.
 
 ## Start locally
 
@@ -62,3 +62,9 @@ docs/                       Design, decisions, scope, security and evidence
 An admin connects three upstream MCP servers once. Two users reach them through a single gateway endpoint or the dashboard chat. API keys are hashed and revocable; upstream credentials stay server-side. Every tool call follows the same authorization and audit path. Disabled servers disappear from discovery and a dead upstream does not prevent calls to healthy servers.
 
 External MCP client setup and dashboard chat instructions will be added when those services work. Optional multi-store provisioning starts only after the mandatory two-user flow passes.
+
+## WooCommerce MCP phase
+
+See [MCP service instructions](services/woocommerce_mcp/README.md) for deployment, credentials, tool contracts and verification. Deploy locally with `./scripts/deploy-mcp.sh`. The upstream is internal-only; the external gateway endpoint is not implemented yet.
+
+[MCP verification evidence](docs/verification-mcp.md) records the five real tool calls, product/order IDs, authentication, validation and isolation checks. Run `make mcp-test` for automated tests. `local-up.sh` retains enabled components in an existing release; use `deploy-mcp.sh` to build/import the MCP image and enable it initially.

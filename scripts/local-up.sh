@@ -16,5 +16,5 @@ chmod 600 "$KUBECONFIG"
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
 python3 scripts/create-secrets.py
 helm upgrade --install urumi charts/platform -n urumi \
-  -f charts/platform/values-local.yaml --wait --wait-for-jobs --timeout 20m
+  -f charts/platform/values-local.yaml --reuse-values --wait --wait-for-jobs --timeout 20m
 kubectl -n urumi get pods,pvc,ingress

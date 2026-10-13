@@ -1,6 +1,6 @@
 # System design: Python team MCP gateway
 
-Status: architecture accepted for implementation, 12 October 2026. The store foundation is deployed in this phase. Gateway, MCP services, chat and React dashboard are planned; they are not claimed as implemented.
+Status: architecture accepted for implementation, 12 October 2026. The store foundation is deployed in this phase. The WooCommerce MCP service is now implemented (ADR 002). The React dashboard has a demo frontend; gateway and chat backend remain planned.
 
 ## Scope and boundaries
 
@@ -24,7 +24,7 @@ flowchart LR
     WP --> Maria[(MariaDB)]
 ```
 
-Only the gateway connects to upstream MCP servers. The browser never knows upstream credentials. The WooCommerce MCP server uses the authenticated `wc/v3` REST API; it never queries WordPress tables directly. PostgreSQL is for the platform; MariaDB is for WordPress. These databases have separate passwords and volumes.
+Only the gateway connects to upstream MCP servers. The browser never knows upstream credentials. The WooCommerce MCP server uses the authenticated `wc/v3` REST API (ADR 002 documents canonical-URL signing and internal-only deployment); it never queries WordPress tables directly. PostgreSQL is for the platform; MariaDB is for WordPress. These databases have separate passwords and volumes.
 
 ## Runtime and repository
 

@@ -11,8 +11,8 @@ status:
 	KUBECONFIG="$(CURDIR)/.local/kubeconfig" kubectl -n urumi get pods,pvc,ingress
 
 check:
-	uv run ruff check scripts
-	uv run ruff format --check scripts
+	uv run ruff check scripts services
+	uv run ruff format --check scripts services
 	helm lint charts/platform
 	helm template urumi charts/platform -f charts/platform/values-local.yaml >/dev/null
 	helm template urumi charts/platform -f charts/platform/values-prod.yaml >/dev/null
@@ -26,3 +26,10 @@ checkout:
 
 isolation:
 	./scripts/verify-network.sh
+
+.PHONY: mcp-up mcp-test
+mcp-up:
+	./scripts/deploy-mcp.sh
+
+mcp-test:
+	uv run pytest services/woocommerce_mcp/tests -q

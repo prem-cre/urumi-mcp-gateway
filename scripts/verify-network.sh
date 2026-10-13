@@ -10,9 +10,12 @@ kubectl -n urumi wait --for=condition=Ready pod -l 'instance=urumi,app in (wordp
 python3 - <<'PY' | kubectl create -f -
 import json
 command = '''
-for entry in urumi-mariadb:3306 urumi-postgres:5432 urumi-wordpress:80; do
+for entry in urumi-mariadb:3306 urumi-postgres:5432 urumi-wordpress:80 urumi-woocommerce-mcp:8000; do
   host="${entry%:*}.urumi.svc.cluster.local"
   port="${entry##*:}"
+  if [ "$entry" = "urumi-woocommerce-mcp:8000" ] && ! nslookup "$host" >/dev/null 2>&1; then
+    echo "SKIP MCP Service not deployed"; continue
+  fi
   nslookup "$host"
   if nc -z -w 3 "$host" "$port"; then
     echo "FAIL unexpected access: $entry"; exit 1

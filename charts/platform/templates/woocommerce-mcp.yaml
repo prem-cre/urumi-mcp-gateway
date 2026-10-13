@@ -1,0 +1,105 @@
+{{- if .Values.woocommerceMcp.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-woocommerce-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: woocommerce-mcp, instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: woocommerce-mcp, instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: mcp
+          image: {{ .Values.woocommerceMcp.image | quote }}
+          imagePullPolicy: {{ .Values.woocommerceMcp.imagePullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          ports: [{name: http, containerPort: 8000}]
+          env:
+            - name: WC_MCP_STORE_URL
+              value: {{ default (printf "http://%s-wordpress" .Release.Name) .Values.woocommerceMcp.storeUrl | quote }}
+            - name: WC_MCP_SIGNING_URL
+              value: {{ .Values.store.url | quote }}
+            - name: WC_MCP_TIMEZONE
+              value: {{ .Values.woocommerceMcp.timezone | quote }}
+            - name: WC_MCP_ALLOWED_HOSTS
+              value: {{ toJson (list (printf "%s-woocommerce-mcp:8000" .Release.Name) (printf "%s-woocommerce-mcp.%s.svc.cluster.local:8000" .Release.Name .Release.Namespace)) | quote }}
+            - name: WC_MCP_CONSUMER_KEY
+              valueFrom: {secretKeyRef: {name: {{ .Values.woocommerceMcp.existingSecret }}, key: consumer-key}}
+            - name: WC_MCP_CONSUMER_SECRET
+              valueFrom: {secretKeyRef: {name: {{ .Values.woocommerceMcp.existingSecret }}, key: consumer-secret}}
+            - name: WC_MCP_GATEWAY_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ .Values.woocommerceMcp.existingSecret }}, key: gateway-token}}
+          resources:
+            {{- toYaml .Values.woocommerceMcp.resources | nindent 12 }}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 15
+            timeoutSeconds: 20
+          volumeMounts: [{name: temp, mountPath: /tmp}]
+      volumes: [{name: temp, emptyDir: {sizeLimit: 32Mi}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-woocommerce-mcp
+spec:
+  type: ClusterIP
+  selector: {app: woocommerce-mcp, instance: {{ .Release.Name }}}
+  ports: [{name: http, port: 8000, targetPort: http}]
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-woocommerce-mcp
+spec:
+  podSelector:
+    matchLabels: {app: woocommerce-mcp, instance: {{ .Release.Name }}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: gateway, instance: {{ .Release.Name }}}
+      ports: [{port: 8000, protocol: TCP}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: wordpress, instance: {{ .Release.Name }}}
+      ports: [{port: 80, protocol: TCP}]
+{{- end }}
+{{- end }}
+{{- if and .Values.woocommerceMcp.enabled .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-gateway-to-woocommerce-mcp
+spec:
+  podSelector:
+    matchLabels: {app: gateway, instance: {{ .Release.Name }}}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: woocommerce-mcp, instance: {{ .Release.Name }}}
+      ports: [{port: 8000, protocol: TCP}]
+{{- end }}

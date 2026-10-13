@@ -17,3 +17,7 @@ The current phase runs the demonstration store and platform database. The gatewa
 Kubernetes Secrets are not synonymous with encryption at rest. The local k3s setup does not enable Secret encryption at rest. TLS to the public storefront is also not configured locally. Databases and WordPress may initialize as root. These limitations must be described in the demo rather than hidden.
 
 A member never seeing an upstream credential does not mean the member has no upstream power: any allowed gateway tool acts with that shared credential. Restrict the available operations, validate arguments, use the smallest upstream credential capability, attribute calls, and revoke promptly. A malicious upstream may lie about its tools or return instructions; schema validation and prompt wording alone cannot make it trustworthy.
+
+## WooCommerce MCP phase (13 October)
+
+Implemented: internal ClusterIP-only service, gateway-only ingress policy, WordPress/DNS-only egress, independent backend bearer credential, dedicated WooCommerce service key, privacy-minimized output, validation/size limits, sanitized failures and no write retries. See ADR 002 and verification-mcp.md. Gateway member policy, hashing/revocation and attributed auditing remain planned. Cluster administrators can impersonate labels; the service token is an additional boundary, not a substitute for Kubernetes RBAC.
