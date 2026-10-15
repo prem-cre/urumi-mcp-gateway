@@ -52,4 +52,4 @@ The temporary verification Job is a developer harness, not an implemented gatewa
 
 For a VPS, publish the image to your registry and set `woocommerceMcp.enabled=true`, its image reference/digest and Secret name through production Helm values. The same manifests apply. No public MCP route is added.
 
-The next phase is the actual gateway: member authentication/revocation, tool aggregation across three upstreams, routing, policies and audit logging. This service's bearer token is a backend service credential, not a team member API key or a full MCP OAuth authorization server.
+The Python team gateway is the only MCP client of this service. It supplies this service bearer token from a Kubernetes Secret, while team identities, revocable user keys, grants, aggregation, routing and audit logs are enforced at the gateway. The dashboard chat calls the same gateway endpoint; it never talks to this service directly. This service token is a backend credential, not a team member API key or a full MCP OAuth authorization server.

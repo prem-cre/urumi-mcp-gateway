@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
 import pytest
@@ -15,9 +15,11 @@ from starlette.responses import JSONResponse
 
 from services.gateway.app import MCPKeyMiddleware
 from services.gateway.config import Settings
-from services.gateway.models import ApiKey, ToolAudit, User
+from services.gateway.models import ApiKey, ToolAudit, User, WebSession
 from services.gateway.security import (
     Principal,
+    authenticate_chat_assertion,
+    create_chat_assertion,
     digest_secret,
     validate_upstream_url,
 )
@@ -164,3 +166,163 @@ def test_external_upstream_rejects_a_private_dns_answer(monkeypatch):
 
     with pytest.raises(HTTPException, match="non-public address"):
         validate_upstream_url("https://mcp.example.test/mcp", settings())
+
+
+@pytest.mark.asyncio
+async def test_chat_assertion_is_signed_and_resolves_the_live_dashboard_principal():
+    config = settings()
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email="member@example.test",
+        display_name="Member",
+        role="member",
+        active=True,
+    )
+    web_session = WebSession(
+        id=session_id,
+        user_id=user_id,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    class AssertionSession:
+        async def get(self, model, identity):
+            if model is WebSession and identity == session_id:
+                return web_session
+            if model is User and identity == user_id:
+                return user
+            return None
+
+    token = create_chat_assertion(
+        Principal(user_id, user.email, user.display_name, user.role, session_id=session_id),
+        config,
+    )
+    principal, reason = await authenticate_chat_assertion(AssertionSession(), token, config)
+
+    assert reason == "ok"
+    assert principal is not None
+    assert principal.user_id == user_id
+    assert principal.role == "member"
+    assert principal.key_id is None
+    assert principal.session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_chat_assertion_rejects_modified_signature_and_expired_session():
+    config = settings()
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email="member@example.test",
+        display_name="Member",
+        role="member",
+        active=True,
+    )
+    web_session = WebSession(
+        id=session_id,
+        user_id=user_id,
+        expires_at=datetime.now(UTC) - timedelta(minutes=1),
+    )
+
+    class AssertionSession:
+        async def get(self, model, identity):
+            if model is WebSession and identity == session_id:
+                return web_session
+            if model is User and identity == user_id:
+                return user
+            return None
+
+    token = create_chat_assertion(
+        Principal(user_id, user.email, user.display_name, user.role, session_id=session_id),
+        config,
+    )
+    invalid, invalid_reason = await authenticate_chat_assertion(
+        AssertionSession(), token[:-1] + ("0" if token[-1] != "0" else "1"), config
+    )
+    expired, expired_reason = await authenticate_chat_assertion(AssertionSession(), token, config)
+
+    assert invalid is None
+    assert invalid_reason == "invalid_chat_assertion"
+    assert expired is not None
+    assert expired.user_id == user_id
+    assert expired_reason == "inactive_chat_session"
+
+
+@pytest.mark.asyncio
+async def test_mcp_middleware_accepts_chat_assertion_as_the_live_database_user():
+    config = settings()
+    user_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    user = User(
+        id=user_id,
+        email="member@example.test",
+        display_name="Member",
+        role="member",
+        active=True,
+    )
+    web_session = WebSession(
+        id=session_id,
+        user_id=user_id,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    class ChatSession:
+        def __init__(self):
+            self.audit_rows: list[ToolAudit] = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def get(self, model, identity):
+            if model is WebSession and identity == session_id:
+                return web_session
+            if model is User and identity == user_id:
+                return user
+            return None
+
+        def add(self, record):
+            if isinstance(record, ToolAudit):
+                self.audit_rows.append(record)
+
+        async def commit(self):
+            return None
+
+    db_session = ChatSession()
+
+    @asynccontextmanager
+    async def sessions():
+        yield db_session
+
+    app = FastAPI()
+    app.add_middleware(MCPKeyMiddleware, sessions=sessions, settings=config)
+
+    @app.get("/mcp")
+    async def mcp_endpoint(request: Request):
+        principal: Principal = request.state.principal
+        return JSONResponse(
+            {
+                "user": principal.email,
+                "role": principal.role,
+                "key_id": principal.key_id,
+                "session_id": str(principal.session_id),
+            }
+        )
+
+    assertion = create_chat_assertion(
+        Principal(user_id, user.email, user.display_name, user.role, session_id=session_id), config
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/mcp", headers={"Authorization": f"Bearer {assertion}"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "user": "member@example.test",
+        "role": "member",
+        "key_id": None,
+        "session_id": str(session_id),
+    }

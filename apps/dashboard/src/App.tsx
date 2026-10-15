@@ -15,6 +15,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Send,
   Server,
   ShieldCheck,
   Sparkles,
@@ -23,7 +24,7 @@ import {
   Zap,
 } from "lucide-react";
 
-type Page = "Overview" | "Servers" | "Assistant" | "Team" | "Activity";
+type Page = "Overview" | "Servers" | "Assistant" | "Team" | "Activity" | "Observability" | "Investigations";
 type Tool = {
   name: string;
   public_name: string;
@@ -65,13 +66,17 @@ const nav: { name: Page; icon: typeof Server }[] = [
   { name: "Assistant", icon: MessageSquare },
   { name: "Team", icon: Users },
   { name: "Activity", icon: Activity },
+  { name: "Observability", icon: Sparkles },
+  { name: "Investigations", icon: Search },
 ];
 const descriptions: Record<Page, string> = {
   Overview: "A little clarity for everything connected.",
   Servers: "One place for every connection your team needs.",
-  Assistant: "The chat tool loop follows after the live gateway core.",
+  Assistant: "Ask questions across your connected tools.",
   Team: "Good work happens together.",
   Activity: "Every action, with a little more context.",
+  Observability: "Model cost, latency, routing and tool health in one view.",
+  Investigations: "Find recurring agent failures and follow the evidence to its trace.",
 };
 
 function Badge({ status }: { status: Connection["status"] }) {
@@ -115,6 +120,78 @@ type Overview = {
   success_rate: number | null;
   average_duration_ms: number | null;
   store_url?: string;
+};
+type ChatToolCall = { name: string; server: string; outcome: string };
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  tools?: ChatToolCall[];
+  route?: { tier: string; reason: string; model: string; provider: string };
+};
+type TraceRow = {
+  id: string;
+  user: string;
+  outcome: string;
+  error_category?: string | null;
+  route_tier?: string | null;
+  route_reason?: string | null;
+  model?: string | null;
+  provider?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  estimated_cost_usd?: number | null;
+  pricing_status: string;
+  started_at: string;
+  duration_ms?: number | null;
+};
+type TraceObservation = {
+  id: string;
+  sequence: number;
+  kind: string;
+  name: string;
+  server?: string | null;
+  status: string;
+  model?: string | null;
+  provider?: string | null;
+  route_tier?: string | null;
+  route_reason?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  input_cost_usd?: number | null;
+  output_cost_usd?: number | null;
+  started_at: string;
+  duration_ms?: number | null;
+  error_category?: string | null;
+  input_preview?: string | null;
+  output_preview?: string | null;
+};
+type TraceDetail = TraceRow & { observations: TraceObservation[]; privacy: string; input_preview?: string | null; output_preview?: string | null };
+type ModelMetric = { model: string; calls: number; failed_calls: number; input_tokens: number; output_tokens: number; known_cost_usd: number; unpriced_calls: number; average_latency_ms: number | null };
+type ServerMetric = { server: string; calls: number; failed_calls: number; average_latency_ms: number | null };
+type ObservabilitySummary = {
+  days: number; chat_turns: number; failed_chat_turns: number; model_calls: number;
+  failed_model_calls: number; tool_calls: number; failed_tool_calls: number;
+  input_tokens: number; output_tokens: number; total_tokens: number; known_cost_usd: number;
+  unpriced_model_calls: number; p95_model_latency_ms: number | null;
+  p95_tool_latency_ms: number | null; models: ModelMetric[]; servers: ServerMetric[];
+};
+type InvestigationRun = {
+  id: string; investigation_id: string; status: string; stage: string; sampled_count: number;
+  model?: string | null; provider?: string | null; input_tokens?: number | null; output_tokens?: number | null;
+  estimated_cost_usd?: number | null; pricing_status: string; duration_ms?: number | null;
+  error_category?: string | null; error_message?: string | null; created_at: string; started_at?: string | null; completed_at?: string | null;
+  findings?: InvestigationFinding[];
+};
+type InvestigationFinding = {
+  id: string; category: string; priority: string; title: string; summary: string;
+  recommendation: string; resolved_at?: string | null; feedback?: string | null;
+  evidence: { trace_id: string; observation_id?: string | null; quote: string }[];
+};
+type Investigation = {
+  id: string; name: string; expected_behavior: string; checks: string[]; window_hours: number;
+  sample_limit: number; max_cost_usd: number; latest_run?: InvestigationRun | null; runs?: InvestigationRun[];
 };
 
 async function apiRequest<T>(path: string, csrf: string, init: RequestInit = {}): Promise<T> {
@@ -163,12 +240,249 @@ export default function App() {
   const [modal, setModal] = useState<"server" | "member">("server");
   const [modalOpen, setModalOpen] = useState(false);
   const [editingServer, setEditingServer] = useState<Connection | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
+  const [observability, setObservability] = useState<ObservabilitySummary | null>(null);
+  const [traceRows, setTraceRows] = useState<TraceRow[]>([]);
+  const [traceDetail, setTraceDetail] = useState<TraceDetail | null>(null);
+  const [observabilityDays, setObservabilityDays] = useState(7);
+  const [observabilityLoading, setObservabilityLoading] = useState(false);
+  const [traceFromFinding, setTraceFromFinding] = useState("");
+  const [investigations, setInvestigations] = useState<Investigation[]>([]);
+  const [selectedInvestigationId, setSelectedInvestigationId] = useState("");
+  const [selectedInvestigation, setSelectedInvestigation] = useState<Investigation | null>(null);
+  const [selectedInvestigationRun, setSelectedInvestigationRun] = useState<InvestigationRun | null>(null);
+  const [investigationBusy, setInvestigationBusy] = useState(false);
+  const [investigationCreateOpen, setInvestigationCreateOpen] = useState(false);
+  const [investigationName, setInvestigationName] = useState("Order assistant quality");
+  const [investigationExpected, setInvestigationExpected] = useState("Use live WooCommerce tools to answer accurately, explain unavailable data clearly, and never invent order or product details.");
+  const [investigationChecks, setInvestigationChecks] = useState("Find tool failures the assistant does not recover from.\nFind repeated calls that do not add useful information.");
+  const [investigationWindow, setInvestigationWindow] = useState(24);
+  const [investigationSample, setInvestigationSample] = useState(10);
+  const [investigationBudget, setInvestigationBudget] = useState("0.50");
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const connected = servers.filter((s) => s.enabled && s.status === "connected");
   const visibleServers = servers.filter((s) =>
     `${s.name} ${s.description}`.toLowerCase().includes(filter.toLowerCase()),
   );
   const toolCount = servers.filter((s) => s.enabled).reduce((n, s) => n + s.tools.length, 0);
+
+  async function sendChatMessage(rawMessage = chatInput) {
+    const message = rawMessage.trim();
+    if (!message || chatBusy || !user) return;
+    const history = chatMessages.slice(-10).map(({ role, content }) => ({ role, content }));
+    setChatMessages((current) => [...current, { role: "user", content: message }]);
+    setChatInput("");
+    setChatBusy(true);
+    try {
+      const result = await apiRequest<{ response: string; tools_called: ChatToolCall[]; trace_id: string; route: ChatMessage["route"] }>("/chat", csrf, {
+        method: "POST",
+        body: JSON.stringify({ message, history }),
+      });
+      setChatMessages((current) => [...current, {
+        role: "assistant",
+        content: result.response,
+        tools: result.tools_called,
+        route: result.route,
+      }]);
+      void refreshLiveStatus(csrf).catch(() => undefined);
+    } catch (error) {
+      setChatMessages((current) => [...current, {
+        role: "assistant",
+        content: error instanceof Error ? error.message : "The chat request failed.",
+      }]);
+    } finally {
+      setChatBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [chatMessages, chatBusy, page]);
+
+  useEffect(() => {
+    if (page !== "Assistant" || !user) return;
+    let active = true;
+    apiRequest<{ configured: boolean }>("/chat/status", csrf)
+      .then((status) => active && setChatConfigured(status.configured))
+      .catch(() => active && setChatConfigured(false));
+    return () => { active = false; };
+  }, [page, user?.id, csrf]);
+
+  useEffect(() => {
+    if (page !== "Observability" || !user) return;
+    let active = true;
+    setObservabilityLoading(true);
+    Promise.all([
+      apiRequest<ObservabilitySummary>(`/observability/summary?days=${observabilityDays}`, csrf),
+      apiRequest<TraceRow[]>(`/observability/traces?days=${observabilityDays}&limit=50`, csrf),
+    ]).then(async ([summary, rows]) => {
+      if (!active) return;
+      setObservability(summary);
+      setTraceRows(rows);
+      if (rows.length) {
+        const targetTrace = traceFromFinding || rows[0].id;
+        const detail = await apiRequest<TraceDetail>(`/observability/traces/${targetTrace}`, csrf);
+        if (active) {
+          setTraceDetail(detail);
+          setTraceFromFinding("");
+        }
+      } else {
+        setTraceDetail(null);
+      }
+    }).catch((error) => {
+      if (active) setNotice(error instanceof Error ? error.message : "Could not load observability data.");
+    }).finally(() => active && setObservabilityLoading(false));
+    return () => { active = false; };
+  }, [page, user?.id, csrf, observabilityDays]);
+
+  async function openTrace(traceId: string) {
+    try {
+      setTraceDetail(await apiRequest<TraceDetail>(`/observability/traces/${traceId}`, csrf));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load this trace.");
+    }
+  }
+
+  useEffect(() => {
+    if (page !== "Investigations" || user?.role !== "admin") return;
+    let active = true;
+    apiRequest<Investigation[]>("/investigations", csrf)
+      .then((rows) => {
+        if (!active) return;
+        setInvestigations(rows);
+        if (!selectedInvestigationId && rows.length) setSelectedInvestigationId(rows[0].id);
+      })
+      .catch((error) => active && setNotice(error instanceof Error ? error.message : "Could not load investigations."));
+    return () => { active = false; };
+  }, [page, user?.id, user?.role, csrf]);
+
+  useEffect(() => {
+    if (page !== "Investigations" || !selectedInvestigationId) return;
+    let active = true;
+    apiRequest<Investigation>(`/investigations/${selectedInvestigationId}`, csrf)
+      .then(async (investigation) => {
+        if (!active) return;
+        setSelectedInvestigation(investigation);
+        const runId = selectedInvestigationRun?.investigation_id === investigation.id
+          ? selectedInvestigationRun.id
+          : investigation.runs?.[0]?.id;
+        if (runId) {
+          const run = await apiRequest<InvestigationRun>(`/investigation-runs/${runId}`, csrf);
+          if (active) setSelectedInvestigationRun(run);
+        } else if (active) {
+          setSelectedInvestigationRun(null);
+        }
+      })
+      .catch((error) => active && setNotice(error instanceof Error ? error.message : "Could not load this investigation."));
+    return () => { active = false; };
+  }, [page, selectedInvestigationId, csrf]);
+
+  useEffect(() => {
+    const run = selectedInvestigationRun;
+    if (page !== "Investigations" || !run || !["queued", "running"].includes(run.status)) return;
+    let active = true;
+    const timer = window.setInterval(() => {
+      apiRequest<InvestigationRun>(`/investigation-runs/${run.id}`, csrf)
+        .then((next) => {
+          if (!active) return;
+          setSelectedInvestigationRun(next);
+          setSelectedInvestigation((current) => current?.id === next.investigation_id
+            ? { ...current, runs: [next, ...(current.runs || []).filter((item) => item.id !== next.id)] }
+            : current);
+          setInvestigations((rows) => rows.map((item) => item.id === next.investigation_id ? { ...item, latest_run: next } : item));
+        })
+        .catch(() => undefined);
+    }, 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [page, selectedInvestigationRun?.id, selectedInvestigationRun?.status, csrf]);
+
+  async function startInvestigationRun(investigationId: string) {
+    setInvestigationBusy(true);
+    try {
+      const run = await apiRequest<InvestigationRun>(`/investigations/${investigationId}/runs`, csrf, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      });
+      setSelectedInvestigationId(investigationId);
+      const detail = await apiRequest<InvestigationRun>(`/investigation-runs/${run.id}`, csrf);
+      setSelectedInvestigationRun(detail);
+      setSelectedInvestigation((current) => current ? { ...current, runs: [detail, ...(current.runs || []).filter((item) => item.id !== detail.id)] } : current);
+      setInvestigations((rows) => rows.map((item) => item.id === investigationId ? { ...item, latest_run: detail } : item));
+      setNotice("Investigation queued. This page will update as the run completes.");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not start the investigation.");
+    } finally {
+      setInvestigationBusy(false);
+    }
+  }
+
+  async function createInvestigation(event: FormEvent) {
+    event.preventDefault();
+    if (investigationBusy) return;
+    setInvestigationBusy(true);
+    try {
+      const created = await apiRequest<Investigation>("/investigations", csrf, {
+        method: "POST",
+        body: JSON.stringify({
+          name: investigationName,
+          expected_behavior: investigationExpected,
+          checks: investigationChecks.split("\n").map((item) => item.trim()).filter(Boolean),
+          window_hours: investigationWindow,
+          sample_limit: investigationSample,
+          max_cost_usd: Number(investigationBudget),
+        }),
+      });
+      setInvestigations((rows) => [created, ...rows]);
+      setSelectedInvestigationId(created.id);
+      setSelectedInvestigation(created);
+      setInvestigationCreateOpen(false);
+      setNotice("Investigation saved. Starting its first run.");
+      const run = await apiRequest<InvestigationRun>(`/investigations/${created.id}/runs`, csrf, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+      });
+      const detail = await apiRequest<InvestigationRun>(`/investigation-runs/${run.id}`, csrf);
+      setSelectedInvestigationRun(detail);
+      setSelectedInvestigation((current) => current ? { ...current, runs: [detail, ...(current.runs || [])] } : current);
+      setInvestigations((rows) => rows.map((item) => item.id === created.id ? { ...item, latest_run: detail } : item));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not create the investigation.");
+    } finally {
+      setInvestigationBusy(false);
+    }
+  }
+
+  async function markFindingResolved(finding: InvestigationFinding) {
+    try {
+      await apiRequest(`/investigation-findings/${finding.id}`, csrf, {
+        method: "PATCH",
+        body: JSON.stringify({ resolved: !finding.resolved_at, feedback: finding.feedback || null }),
+      });
+      if (selectedInvestigationRun) {
+        setSelectedInvestigationRun(await apiRequest<InvestigationRun>(`/investigation-runs/${selectedInvestigationRun.id}`, csrf));
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update this finding.");
+    }
+  }
+
+  async function markFindingExpected(finding: InvestigationFinding) {
+    try {
+      await apiRequest(`/investigation-findings/${finding.id}`, csrf, {
+        method: "PATCH",
+        body: JSON.stringify({ resolved: false, feedback: "This behavior is expected." }),
+      });
+      if (selectedInvestigationRun) {
+        setSelectedInvestigationRun(await apiRequest<InvestigationRun>(`/investigation-runs/${selectedInvestigationRun.id}`, csrf));
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not save finding feedback.");
+    }
+  }
 
   useEffect(() => {
     const incomingToken = new URLSearchParams(window.location.search).get("invite");
@@ -494,7 +808,7 @@ export default function App() {
         </div>
         <span className="nav-label">WORKSPACE</span>
         <nav aria-label="Main navigation">
-          {nav.map(({ name, icon: Icon }) => (
+          {nav.filter(({ name }) => name !== "Investigations" || user.role === "admin").map(({ name, icon: Icon }) => (
             <button
               key={name}
               className={`nav-item ${page === name ? "active" : ""}`}
@@ -559,6 +873,10 @@ export default function App() {
             ) : user.role === "admin" && page === "Team" ? (
               <button className="primary" onClick={() => openModal("member")}>
                 <Plus size={16} /> Invite member
+              </button>
+            ) : user.role === "admin" && page === "Investigations" ? (
+              <button className="primary" onClick={() => setInvestigationCreateOpen((open) => !open)}>
+                <Plus size={16} /> New investigation
               </button>
             ) : null}
           </div>
@@ -675,11 +993,11 @@ export default function App() {
                   <span className="eyebrow">A LITTLE HELP GOES A LONG WAY</span>
                   <h2>Talk to your workspace.</h2>
                   <p>
-                    Ask your workspace after the chat agent loop is connected. The MCP endpoint and policy layer are live.
+                    Ask your workspace about store data and connected services. The assistant uses the same policy checked gateway as external clients.
                   </p>
                   <button className="prompt-example" onClick={() => navigate("Assistant")}>
                     <MessageSquare size={16} />
-                    View the assistant milestone
+                    Open the assistant
                     <ArrowUpRight size={16} />
                   </button>
                     <button className="text-button" onClick={() => navigate("Assistant")}>
@@ -823,18 +1141,83 @@ export default function App() {
             </>
           ) : null}
           {page === "Assistant" ? (
-            <section className="panel milestone-panel">
-              <span className="assistant-bloom"><Sparkles size={30} /></span>
-              <div>
-                <div className="eyebrow">NEXT MILESTONE</div>
-                <h2>Chat agent through the same gateway</h2>
-                <p>The MCP endpoint is live. The next phase will add the model tool loop here, using your signed-in identity so its calls follow the same permissions and audit path.</p>
-                <div className="milestone-details">
-                  <span><Check size={14} /> Shared catalog and routing</span>
-                  <span><Check size={14} /> Per-user keys and revocation</span>
-                  <span><Activity size={14} /> Audited upstream calls</span>
+            <section className="panel chat-panel">
+              <div className="panel-heading chat-heading">
+                <div>
+                  <div className="eyebrow">URUMI ASSISTANT</div>
+                  <h2>Ask your connected tools</h2>
+                  <p>Answers use the live gateway catalog and follow your account permissions.</p>
+                  <span className={`chat-provider-status ${chatConfigured ? "ready" : ""}`}>
+                    {chatConfigured === null ? "Checking model setup…" : chatConfigured ? "Model configured" : "Model setup needed"}
+                  </span>
                 </div>
+                <span className="badge neutral"><Sparkles size={13} /> Acting as {user.name}</span>
               </div>
+              <div className="chat-messages" aria-live="polite">
+                {chatConfigured === false ? (
+                  <div className="chat-setup-note">
+                    Set the OpenAI-compatible provider URL and model in Helm values, then add its API key to the Kubernetes Secret. See the chat setup instructions in the gateway README.
+                  </div>
+                ) : null}
+                {chatMessages.length === 0 ? (
+                  <div className="chat-empty">
+                    <span className="assistant-bloom"><Sparkles size={25} /></span>
+                    <h2>What would you like to know?</h2>
+                    <p>Ask about the store or combine information from multiple connected services.</p>
+                    <div className="chat-suggestions">
+                      {[
+                        "What products are in my store?",
+                        "What orders came in today?",
+                        "Find today's orders and check inventory for their products.",
+                      ].map((suggestion) => (
+                        <button className="secondary" key={suggestion} disabled={chatBusy} onClick={() => void sendChatMessage(suggestion)}>
+                          {suggestion}<ArrowRight size={14} />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : chatMessages.map((item, index) => (
+                  <article className={`chat-message ${item.role}`} key={`${item.role}-${index}`}>
+                    <span className="message-label">{item.role === "user" ? "You" : "Assistant"}</span>
+                    <p>{item.content}</p>
+                    {item.route ? (
+                      <div className="chat-route-note" title={item.route.reason}>
+                        <Sparkles size={12} /> {item.route.tier} route · {item.route.model}
+                      </div>
+                    ) : null}
+                    {item.tools?.length ? (
+                      <div className="chat-tool-traces" aria-label="Tools called">
+                        {item.tools.map((tool, toolIndex) => (
+                          <span className={`tool-trace ${tool.outcome === "success" ? "success" : "failure"}`} key={`${tool.name}-${toolIndex}`} title={`${tool.server} · ${tool.outcome.replaceAll("_", " ")}`}>
+                            {tool.outcome === "success" ? <Check size={12} /> : <X size={12} />}{tool.name}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </article>
+                ))}
+                {chatBusy ? (
+                  <div className="chat-message assistant chat-pending">
+                    <span className="message-label">Assistant</span>
+                    <p><span className="loading-dot" /> Checking your connected tools…</p>
+                  </div>
+                ) : null}
+                <div ref={chatEndRef} />
+              </div>
+              <form className="chat-input" onSubmit={(event) => { event.preventDefault(); void sendChatMessage(); }}>
+                <input
+                  aria-label="Message the assistant"
+                  placeholder="Ask about products, orders, or connected services…"
+                  value={chatInput}
+                  maxLength={4000}
+                  disabled={chatBusy}
+                  onChange={(event) => setChatInput(event.target.value)}
+                />
+                <button className="primary" type="submit" aria-label="Send message" disabled={!chatInput.trim() || chatBusy}>
+                  <Send size={16} />
+                </button>
+              </form>
+              <p className="chat-disclaimer">Tool access follows your workspace grants. Each tool call is checked and recorded in Activity.</p>
             </section>
           ) : null}
           {page === "Team" ? (
@@ -943,6 +1326,157 @@ export default function App() {
               </div>
               {activityTable()}
             </section>
+          ) : null}
+          {page === "Observability" ? (
+            <div className="observability-page">
+              <div className="section-toolbar">
+                <span>{user.role === "admin" ? "Workspace-wide model and tool telemetry" : "Your model and tool telemetry"}</span>
+                <label className="search observability-range">
+                  <span>Window</span>
+                  <select value={observabilityDays} onChange={(event) => setObservabilityDays(Number(event.target.value))}>
+                    <option value={1}>24 hours</option>
+                    <option value={7}>7 days</option>
+                    <option value={30}>30 days</option>
+                  </select>
+                </label>
+              </div>
+              {observabilityLoading && !observability ? <p className="empty-small">Loading telemetry…</p> : null}
+              {observability ? (
+                <>
+                  <div className="obs-stats">
+                    <div className="obs-stat"><span>Estimated model cost</span><strong>{observability.model_calls ? `~$${observability.known_cost_usd.toFixed(4)}` : "—"}</strong><small>{observability.model_calls === 0 ? "No model generations recorded" : observability.unpriced_model_calls ? `${observability.unpriced_model_calls} model calls have no price` : "All observed model calls priced"}</small></div>
+                    <div className="obs-stat"><span>Tokens</span><strong>{observability.model_calls ? observability.total_tokens.toLocaleString() : "—"}</strong><small>{observability.model_calls ? `${observability.input_tokens.toLocaleString()} in · ${observability.output_tokens.toLocaleString()} out` : "Usage appears after a model call"}</small></div>
+                    <div className="obs-stat"><span>Model calls</span><strong>{observability.model_calls}</strong><small>{observability.failed_model_calls} failed · p95 {observability.p95_model_latency_ms ?? "—"} ms</small></div>
+                    <div className="obs-stat"><span>Gateway tool calls</span><strong>{observability.tool_calls}</strong><small>{observability.failed_tool_calls} failed · p95 {observability.p95_tool_latency_ms ?? "—"} ms</small></div>
+                  </div>
+                  <div className="obs-grid">
+                    <section className="panel obs-table-panel">
+                      <div className="panel-heading"><div><h2>Model usage</h2><p>Usage and estimated cost by returned model.</p></div></div>
+                      {observability.models.length ? (
+                        <div className="table-scroll"><table><thead><tr><th>Model</th><th>Calls</th><th>Tokens</th><th>Estimated cost</th><th>Avg latency</th></tr></thead><tbody>
+                          {observability.models.map((model) => <tr key={model.model}>
+                            <td><strong>{model.model}</strong>{model.unpriced_calls ? <small className="warning-text">{model.unpriced_calls} unpriced</small> : null}</td>
+                            <td>{model.calls}{model.failed_calls ? <small className="warning-text">{model.failed_calls} failed</small> : null}</td>
+                            <td>{(model.input_tokens + model.output_tokens).toLocaleString()}</td>
+                            <td>~${model.known_cost_usd.toFixed(4)}</td>
+                            <td>{model.average_latency_ms ?? "—"} ms</td>
+                          </tr>)}
+                        </tbody></table></div>
+                      ) : <p className="empty-small">No model generations in this time window.</p>}
+                    </section>
+                    <section className="panel obs-table-panel">
+                      <div className="panel-heading"><div><h2>Upstream tool health</h2><p>Calls dispatched through the gateway.</p></div></div>
+                      {observability.servers.length ? (
+                        <div className="table-scroll"><table><thead><tr><th>Server</th><th>Calls</th><th>Failures</th><th>Avg latency</th></tr></thead><tbody>
+                          {observability.servers.map((server) => <tr key={server.server}><td><strong>{server.server}</strong></td><td>{server.calls}</td><td>{server.failed_calls}</td><td>{server.average_latency_ms ?? "—"} ms</td></tr>)}
+                        </tbody></table></div>
+                      ) : <p className="empty-small">No gateway tool calls in this time window.</p>}
+                    </section>
+                  </div>
+                  <section className="panel trace-explorer">
+                    <div className="panel-heading"><div><h2>Agent traces</h2><p>Each chat turn links the model generations and tool calls in execution order.</p></div></div>
+                    <div className="trace-layout">
+                      <div className="trace-list">
+                        {traceRows.length ? traceRows.map((trace) => (
+                          <button className={`trace-row ${traceDetail?.id === trace.id ? "selected" : ""}`} key={trace.id} onClick={() => void openTrace(trace.id)}>
+                            <span className={`trace-status ${trace.outcome === "success" ? "ok" : "bad"}`} />
+                            <span className="trace-row-main"><strong>{trace.model || "Model not selected"}</strong><small>{new Date(trace.started_at).toLocaleString()} · {trace.user}</small></span>
+                            <span className="trace-row-cost">{trace.estimated_cost_usd == null ? "Unpriced" : `~$${trace.estimated_cost_usd.toFixed(4)}${trace.pricing_status === "partial" ? " partial" : ""}`}</span>
+                          </button>
+                        )) : <p className="empty-small">Chat traces will appear here after the assistant is configured and used.</p>}
+                      </div>
+                      <div className="trace-detail">
+                        {traceDetail ? (
+                          <>
+                            <div className="trace-detail-heading"><div><span className="eyebrow">{traceDetail.route_tier || "CHAT"} ROUTE</span><h3>{traceDetail.model || "Model not selected"}</h3><p>{traceDetail.route_reason || traceDetail.error_category || "No routing decision recorded."}</p></div><span className={`badge ${traceDetail.outcome === "success" ? "green" : "warning"}`}>{traceDetail.outcome.replaceAll("_", " ")}</span></div>
+                            {traceDetail.input_preview || traceDetail.output_preview ? <details className="trace-content-preview"><summary>Run input and final response</summary>{traceDetail.input_preview ? <div><strong>Input</strong><pre>{traceDetail.input_preview}</pre></div> : null}{traceDetail.output_preview ? <div><strong>Final response</strong><pre>{traceDetail.output_preview}</pre></div> : null}</details> : null}
+                            <div className="trace-steps">
+                              {traceDetail.observations.map((step) => (
+                                <article className="trace-step" key={step.id}>
+                                  <span className={`trace-kind ${step.kind}`}>{step.kind === "generation" ? "LLM" : "TOOL"}</span>
+                                  <div className="trace-step-main"><strong>{step.name}</strong><small>{step.model || step.server || step.provider || step.status}</small>{step.route_reason ? <small>{step.route_reason}</small> : null}{step.input_preview || step.output_preview ? <details className="trace-step-content"><summary>Step data</summary>{step.input_preview ? <pre>{step.input_preview}</pre> : null}{step.output_preview ? <pre>{step.output_preview}</pre> : null}</details> : null}</div>
+                                  <div className="trace-step-metrics"><strong>{step.duration_ms ?? "—"} ms</strong><small>{step.total_tokens == null ? step.status.replaceAll("_", " ") : `${step.total_tokens.toLocaleString()} tokens`}</small>{step.error_category ? <small className="warning-text">{step.error_category.replaceAll("_", " ")}</small> : null}</div>
+                                </article>
+                              ))}
+                              {!traceDetail.observations.length ? <p className="empty-small">No completed steps were captured for this trace.</p> : null}
+                            </div>
+                            <p className="trace-privacy">{traceDetail.privacy}</p>
+                          </>
+                        ) : <p className="empty-small">Select a trace to inspect its model and tool steps.</p>}
+                      </div>
+                    </div>
+                  </section>
+                </>
+              ) : null}
+            </div>
+          ) : null}
+          {page === "Investigations" && user.role === "admin" ? (
+            <div className="investigations-page">
+              <div className="investigation-privacy">
+                <ShieldCheck size={18} />
+                <div>
+                  <strong>Trace content is redacted and retained for a short window.</strong>
+                  <p>Investigations send selected trace previews to the configured analysis model. Redaction is best effort; use synthetic store data and review workspace privacy settings before enabling this in production.</p>
+                </div>
+              </div>
+              {investigationCreateOpen ? (
+                <form className="panel investigation-form" onSubmit={(event) => void createInvestigation(event)}>
+                  <div className="panel-heading"><div><h2>New investigation</h2><p>Define what a good assistant run looks like, then inspect a bounded sample.</p></div></div>
+                  <label className="field"><span>Name</span><input value={investigationName} onChange={(event) => setInvestigationName(event.target.value)} maxLength={120} required /></label>
+                  <label className="field"><span>Expected behavior</span><textarea value={investigationExpected} onChange={(event) => setInvestigationExpected(event.target.value)} maxLength={2000} rows={3} required /></label>
+                  <label className="field"><span>Checks, one per line</span><textarea value={investigationChecks} onChange={(event) => setInvestigationChecks(event.target.value)} maxLength={3000} rows={3} /></label>
+                  <div className="investigation-form-options">
+                    <label className="field"><span>Look back</span><select value={investigationWindow} onChange={(event) => setInvestigationWindow(Number(event.target.value))}><option value={24}>24 hours</option><option value={72}>3 days</option><option value={168}>7 days</option></select></label>
+                    <label className="field"><span>Maximum traces</span><input type="number" min={1} max={25} value={investigationSample} onChange={(event) => setInvestigationSample(Number(event.target.value))} /></label>
+                    <label className="field"><span>Estimated cost limit (USD)</span><input type="number" min={0.01} max={5} step={0.01} value={investigationBudget} onChange={(event) => setInvestigationBudget(event.target.value)} /></label>
+                  </div>
+                  <div className="investigation-form-actions"><button type="button" className="secondary" onClick={() => setInvestigationCreateOpen(false)}>Cancel</button><button type="submit" className="primary" disabled={investigationBusy}>{investigationBusy ? "Saving…" : "Save and run"}<ArrowRight size={14} /></button></div>
+                </form>
+              ) : null}
+              <div className="investigation-layout">
+                <section className="panel investigation-list-panel">
+                  <div className="panel-heading"><div><h2>Investigations</h2><p>Saved expectations and recent run status.</p></div></div>
+                  {investigations.length ? investigations.map((item) => (
+                    <button key={item.id} className={`investigation-row ${selectedInvestigationId === item.id ? "selected" : ""}`} onClick={() => { setSelectedInvestigationRun(null); setSelectedInvestigationId(item.id); }}>
+                      <span className="investigation-row-icon"><Search size={15} /></span>
+                      <span><strong>{item.name}</strong><small>{item.latest_run ? `${item.latest_run.status.replaceAll("_", " ")} · ${item.latest_run.sampled_count} traces` : "No runs yet"}</small></span>
+                      <ChevronRight size={15} />
+                    </button>
+                  )) : <p className="empty-small">No investigations saved yet. Create one after redacted trace capture and model pricing are configured.</p>}
+                </section>
+                <section className="panel investigation-detail-panel">
+                  {selectedInvestigation ? (
+                    <>
+                      <div className="panel-heading investigation-detail-top">
+                        <div><span className="eyebrow">TRACE REVIEW</span><h2>{selectedInvestigation.name}</h2><p>{selectedInvestigation.expected_behavior}</p></div>
+                        <button className="secondary" disabled={investigationBusy || !!selectedInvestigationRun && ["queued", "running"].includes(selectedInvestigationRun.status)} onClick={() => void startInvestigationRun(selectedInvestigation.id)}><Zap size={14} /> Run now</button>
+                      </div>
+                      <div className="investigation-meta"><span>Last {selectedInvestigation.window_hours}h</span><span>Up to {selectedInvestigation.sample_limit} traces</span><span>Budget cap ~${selectedInvestigation.max_cost_usd.toFixed(2)}</span></div>
+                      {selectedInvestigation.runs?.length ? <div className="investigation-history"><span>Run history</span>{selectedInvestigation.runs.map((run) => <button key={run.id} className={selectedInvestigationRun?.id === run.id ? "active" : ""} onClick={() => void apiRequest<InvestigationRun>(`/investigation-runs/${run.id}`, csrf).then(setSelectedInvestigationRun)}>{new Date(run.created_at).toLocaleString()} · {run.status}</button>)}</div> : null}
+                      {selectedInvestigationRun ? (
+                        <>
+                          <div className="investigation-run-summary"><div><small>STATUS</small><strong className={`run-status ${selectedInvestigationRun.status}`}>{selectedInvestigationRun.status === "running" ? selectedInvestigationRun.stage.replaceAll("_", " ") : selectedInvestigationRun.status}</strong></div><div><small>TRACES REVIEWED</small><strong>{selectedInvestigationRun.sampled_count}</strong></div><div><small>ANALYSIS COST</small><strong>{selectedInvestigationRun.estimated_cost_usd == null ? selectedInvestigationRun.pricing_status : `~$${selectedInvestigationRun.estimated_cost_usd.toFixed(4)}`}</strong></div><div><small>MODEL</small><strong>{selectedInvestigationRun.model || "—"}</strong></div></div>
+                          {selectedInvestigationRun.error_category ? <div className="investigation-error">{selectedInvestigationRun.error_message || `Run stopped: ${selectedInvestigationRun.error_category.replaceAll("_", " ")}.`}</div> : null}
+                          {selectedInvestigationRun.status === "queued" || selectedInvestigationRun.status === "running" ? <p className="empty-small">The analysis worker is reviewing the selected traces. The run will update automatically.</p> : null}
+                          {selectedInvestigationRun.status === "completed" && !selectedInvestigationRun.findings?.length ? <p className="empty-small">No supported findings in this sample. The run completed without a claim that lacked trace evidence.</p> : null}
+                          <div className="investigation-findings">
+                            {selectedInvestigationRun.findings?.map((finding) => (
+                              <article className={`finding-card ${finding.resolved_at ? "resolved" : ""}`} key={finding.id}>
+                                <div className="finding-heading"><span className={`finding-priority ${finding.priority}`}>{finding.priority}</span><span className={`finding-category ${finding.category}`}>{finding.category.replaceAll("_", " ")}</span>{finding.resolved_at ? <span className="finding-resolved">Resolved</span> : null}</div>
+                                <h3>{finding.title}</h3><p>{finding.summary}</p>
+                                <div className="finding-recommendation"><strong>Suggested next step</strong><p>{finding.recommendation}</p></div>
+                                <div className="finding-evidence"><strong>Evidence</strong>{finding.evidence.map((evidence, index) => <div key={`${evidence.trace_id}-${index}`}><blockquote>{evidence.quote}</blockquote><button className="text-button" onClick={() => { setTraceFromFinding(evidence.trace_id); navigate("Observability"); }}>Open original trace <ArrowUpRight size={13} /></button></div>)}</div>
+                                <div className="finding-actions"><button className="text-button" onClick={() => void markFindingExpected(finding)}>{finding.feedback ? "Expected behavior noted" : "This is expected"}</button><button className="text-button" onClick={() => void markFindingResolved(finding)}>{finding.resolved_at ? "Reopen finding" : "Mark resolved"}</button></div>
+                              </article>
+                            ))}
+                          </div>
+                        </>
+                      ) : <p className="empty-small">Create a run to sample recent captured traces and review evidence-backed findings.</p>}
+                    </>
+                  ) : <p className="empty-small">Choose an investigation or create one to get started.</p>}
+                </section>
+              </div>
+            </div>
           ) : null}
           <footer>
             <span>Made for the way your team works.</span>

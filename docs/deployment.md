@@ -2,7 +2,7 @@
 
 ## Local prerequisites
 
-Docker Desktop must be running. Install Helm, k3d, kubectl, Docker BuildKit and uv. The foundation was developed on Apple Silicon/macOS; cluster images support that architecture. Python dependencies use `uv sync --locked` and Python 3.12. No LLM account is required for the gateway phase.
+Docker Desktop must be running. Install Helm, k3d, kubectl, Docker BuildKit and uv. The foundation was developed on Apple Silicon/macOS; cluster images support that architecture. Python dependencies use `uv sync --locked` and Python 3.12. An OpenAI-compatible model endpoint is optional for deploying the store and gateway, and is required to run dashboard chat.
 
 ```sh
 brew install helm k3d
@@ -46,6 +46,21 @@ KUBECONFIG="$PWD/.local/kubeconfig" kubectl -n urumi get pods,pvc,ingress
 ```
 
 Dashboard: `http://gateway.localhost:8080`. MCP URL: `http://gateway.localhost:8080/mcp`. Read the generated admin password from `.local/credentials.json`. Invite a second account and use each account's own key for the external MCP client. The local chart's generated DB and app Secrets are `urumi-gateway-db` and `urumi-gateway-app`; the dedicated WooCommerce MCP runtime uses `urumi-woocommerce-mcp`.
+
+The chat loop uses an OpenAI-compatible Chat Completions endpoint. The model URL and name are non-secret deployment settings; supply both to the deploy script after setting any required provider key in the Kubernetes Secret:
+
+```sh
+python3 scripts/set-llm-secret.py  # hidden prompt; skip for providers without API keys
+URUMI_LLM_BASE_URL=https://api.example.com/v1 \
+URUMI_LLM_MODEL=your-model-name \
+./scripts/deploy-gateway.sh
+```
+
+Optionally set `URUMI_LLM_ROUTER_MODEL` to delegate model selection to a LiteLLM Auto Router alias. Otherwise, `URUMI_LLM_STANDARD_MODEL` and `URUMI_LLM_COMPLEX_MODEL` configure this gateway's transparent two-tier heuristic. Explicit cross-server or multi-step prompts select the complex profile. Set `URUMI_LLM_ANALYSIS_MODEL` to choose an investigation model; it uses the same provider URL and server-side key as chat. Set `gateway.llm.providerName` to a display label. Define `gateway.llm.modelPricing` in values with `input_per_million` and `output_per_million` USD rates. The Observability page combines response token counts with those rates to show estimates; absent or mismatched prices are marked unpriced. Investigations require explicit model prices so they can apply a conservative estimated per-run cap.
+
+The script prompts for a key without echo and stores it as `llm-api-key` in `urumi-gateway-app`; it does not print or save the key to disk. It retains the other Secret data. When no provider is configured, the dashboard shows **Model setup needed** and `/api/chat` returns HTTP 503. A VPS deployment sets the corresponding `gateway.llm` values and supplies `llm-api-key` through its existing Secret manager. Do not put provider keys in Helm values, `.env` files or source control.
+
+Each chat turn creates an admin/member-scoped trace with one observation per model generation and tool call. Trace metadata contains model, route reason, token usage, configured-price estimates, latency, outcomes and safe error categories. Content previews are opt-in deployment settings: local values enable bounded heuristic-redacted previews for synthetic demo data, production values keep capture disabled, and previews are cleared within five minutes after the configured TTL (7 days by default). Redaction can miss personal data; do not enable content capture for real customer data before reviewing consent, encryption and deletion controls. Analysis sends only the selected redacted previews to the configured model. It has no tools and must return evidence linked to exact captured steps. Investigation runs/findings are admin-only, on-demand, capped by sample size, output tokens and a conservative estimated per-run spend; provider-specific tokenization and invoice amounts can differ. Run metadata and findings do not yet have a separate retention policy. The Observability page summarizes a selectable 1, 7 or 30 day window; high-volume production use needs external trace storage and metrics export.
 
 ## What is installed
 

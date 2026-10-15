@@ -17,3 +17,21 @@ gateway:
     - http://localhost:*
     - http://127.0.0.1:*
   sessionCookieSecure: false
+  observability:
+    # Local assessment data is synthetic; content is still redacted and expires after 7 days.
+    captureContent: true
+    traceContentRetentionDays: 7
+  llm:
+    # Configure an OpenAI-compatible API or a reachable local model service.
+    # Keep provider credentials in the urumi-gateway-app Secret.
+    baseUrl: ""
+    model: ""
+    routerModel: ""
+    # Optional aliases through LiteLLM Proxy: cheaper model for simple turns,
+    # stronger model for cross-server or multi-step questions.
+    standardModel: ""
+    complexModel: ""
+    analysisModel: ""
+    providerName: OpenAI-compatible endpoint
+    # Rates in USD per 1M tokens. Unknown models remain visible as unpriced.
+    modelPricing: {}

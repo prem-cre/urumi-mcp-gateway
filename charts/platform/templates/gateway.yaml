@@ -89,6 +89,44 @@ spec:
               value: {{ .Values.gateway.discoveryTimeoutSeconds | quote }}
             - name: GATEWAY_PROBE_INTERVAL_SECONDS
               value: {{ .Values.gateway.probeIntervalSeconds | quote }}
+            - name: GATEWAY_CHAT_GATEWAY_MCP_URL
+              value: "http://127.0.0.1:8000/mcp"
+            - name: GATEWAY_LLM_BASE_URL
+              value: {{ .Values.gateway.llm.baseUrl | quote }}
+            - name: GATEWAY_LLM_MODEL
+              value: {{ .Values.gateway.llm.model | quote }}
+            - name: GATEWAY_LLM_ROUTER_MODEL
+              value: {{ .Values.gateway.llm.routerModel | quote }}
+            - name: GATEWAY_LLM_STANDARD_MODEL
+              value: {{ .Values.gateway.llm.standardModel | quote }}
+            - name: GATEWAY_LLM_COMPLEX_MODEL
+              value: {{ .Values.gateway.llm.complexModel | quote }}
+            - name: GATEWAY_LLM_ANALYSIS_MODEL
+              value: {{ .Values.gateway.llm.analysisModel | quote }}
+            - name: GATEWAY_LLM_PROVIDER_NAME
+              value: {{ .Values.gateway.llm.providerName | quote }}
+            - name: GATEWAY_LLM_MODEL_PRICING
+              value: {{ toJson .Values.gateway.llm.modelPricing | quote }}
+            - name: GATEWAY_TRACE_CONTENT_CAPTURE_ENABLED
+              value: {{ .Values.gateway.observability.captureContent | quote }}
+            - name: GATEWAY_TRACE_CONTENT_RETENTION_DAYS
+              value: {{ .Values.gateway.observability.traceContentRetentionDays | quote }}
+            - name: GATEWAY_ANALYSIS_POLL_SECONDS
+              value: {{ .Values.gateway.observability.analysisPollSeconds | quote }}
+            - name: GATEWAY_ANALYSIS_LEASE_SECONDS
+              value: {{ .Values.gateway.observability.analysisLeaseSeconds | quote }}
+            - name: GATEWAY_ANALYSIS_TIMEOUT_SECONDS
+              value: {{ .Values.gateway.observability.analysisTimeoutSeconds | quote }}
+            - name: GATEWAY_ANALYSIS_MAX_OUTPUT_TOKENS
+              value: {{ .Values.gateway.observability.analysisMaxOutputTokens | quote }}
+            - name: GATEWAY_ANALYSIS_MAX_TRACES
+              value: {{ .Values.gateway.observability.analysisMaxTraces | quote }}
+            - name: GATEWAY_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.existingSecret }}
+                  key: llm-api-key
+                  optional: true
           resources:
             {{- toYaml .Values.gateway.resources | nindent 12 }}
           startupProbe:

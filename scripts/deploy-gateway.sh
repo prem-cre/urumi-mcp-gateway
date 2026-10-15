@@ -13,6 +13,33 @@ tag="dev-$(date +%s)"
 gateway_image="urumi/gateway:$tag"
 demo_image="urumi/demo-mcp:$tag"
 dashboard_image="urumi/dashboard:$tag"
+llm_args=(
+  --set-string gateway.llm.baseUrl=
+  --set-string gateway.llm.model=
+  --set-string gateway.llm.routerModel=
+  --set-string gateway.llm.standardModel=
+  --set-string gateway.llm.complexModel=
+  --set-string gateway.llm.analysisModel=
+)
+if [[ -n "${URUMI_LLM_BASE_URL:-}" || -n "${URUMI_LLM_MODEL:-}" || -n "${URUMI_LLM_ROUTER_MODEL:-}" || -n "${URUMI_LLM_STANDARD_MODEL:-}" || -n "${URUMI_LLM_COMPLEX_MODEL:-}" || -n "${URUMI_LLM_ANALYSIS_MODEL:-}" ]]; then
+  [[ -n "${URUMI_LLM_BASE_URL:-}" ]] || {
+    echo "Set URUMI_LLM_BASE_URL when configuring a model, or leave all model variables empty." >&2
+    exit 1
+  }
+  [[ -n "${URUMI_LLM_MODEL:-}${URUMI_LLM_ROUTER_MODEL:-}${URUMI_LLM_STANDARD_MODEL:-}${URUMI_LLM_COMPLEX_MODEL:-}${URUMI_LLM_ANALYSIS_MODEL:-}" ]] || {
+    echo "Set a chat model/profile or URUMI_LLM_ANALYSIS_MODEL." >&2
+    exit 1
+  }
+  llm_args+=(--set-string "gateway.llm.baseUrl=$URUMI_LLM_BASE_URL")
+  llm_args+=(--set-string "gateway.llm.model=${URUMI_LLM_MODEL:-}")
+  llm_args+=(--set-string "gateway.llm.routerModel=${URUMI_LLM_ROUTER_MODEL:-}")
+  llm_args+=(--set-string "gateway.llm.standardModel=${URUMI_LLM_STANDARD_MODEL:-}")
+  llm_args+=(--set-string "gateway.llm.complexModel=${URUMI_LLM_COMPLEX_MODEL:-}")
+  llm_args+=(--set-string "gateway.llm.analysisModel=${URUMI_LLM_ANALYSIS_MODEL:-}")
+  if [[ -n "${URUMI_LLM_PROVIDER_NAME:-}" ]]; then
+    llm_args+=(--set-string "gateway.llm.providerName=$URUMI_LLM_PROVIDER_NAME")
+  fi
+fi
 docker build -f services/gateway/Dockerfile -t "$gateway_image" .
 docker build -f services/demo_mcp/Dockerfile -t "$demo_image" .
 docker build -f apps/dashboard/Dockerfile -t "$dashboard_image" .
@@ -30,6 +57,7 @@ helm upgrade --install urumi charts/platform -n urumi \
   --set-string demoMcp.image="$demo_image" \
   --set-string gateway.image="$gateway_image" \
   --set-string dashboard.image="$dashboard_image" \
+  "${llm_args[@]}" \
   --wait --wait-for-jobs --timeout 10m
 
 kubectl -n urumi rollout status deployment/urumi-gateway --timeout=180s

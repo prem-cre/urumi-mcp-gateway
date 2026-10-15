@@ -84,6 +84,71 @@ async def authenticate_api_key(
     return Principal(user.id, user.email, user.display_name, user.role, key_id), "ok"
 
 
+def create_chat_assertion(principal: Principal, settings: Settings) -> str:
+    """Mint a short-lived internal bearer token for one dashboard chat turn."""
+    if principal.session_id is None:
+        raise ValueError("A dashboard session is required for chat delegation")
+    expires_at = int((datetime.now(UTC) + timedelta(minutes=2)).timestamp())
+    payload = ".".join(
+        (
+            "chatv1",
+            str(principal.user_id),
+            str(principal.session_id),
+            str(expires_at),
+            secrets.token_urlsafe(12),
+        )
+    )
+    signature = hmac.new(
+        settings.session_pepper.get_secret_value().encode(),
+        payload.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}.{signature}"
+
+
+async def authenticate_chat_assertion(
+    session: AsyncSession, presented: str, settings: Settings
+) -> tuple[Principal | None, str]:
+    """Validate an internal assertion and re-check its source session on every MCP request."""
+    parts = presented.split(".")
+    if len(parts) != 6 or parts[0] != "chatv1":
+        return None, "invalid_chat_assertion"
+    _, raw_user_id, raw_session_id, raw_expiry, nonce, signature = parts
+    if not nonce or not raw_expiry.isdecimal() or len(signature) != 64:
+        return None, "invalid_chat_assertion"
+    payload = ".".join(parts[:-1])
+    expected = hmac.new(
+        settings.session_pepper.get_secret_value().encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None, "invalid_chat_assertion"
+    try:
+        user_id = uuid.UUID(raw_user_id)
+        session_id = uuid.UUID(raw_session_id)
+        expires_at = int(raw_expiry)
+    except ValueError:
+        return None, "invalid_chat_assertion"
+    now = datetime.now(UTC)
+    user = await session.get(User, user_id)
+    if user is None:
+        return None, "inactive_user"
+    principal = Principal(
+        user.id,
+        user.email,
+        user.display_name,
+        user.role,
+        session_id=session_id,
+    )
+    if expires_at <= int(now.timestamp()):
+        return principal, "expired_chat_assertion"
+    web_session = await session.get(WebSession, session_id)
+    if web_session is None or web_session.user_id != user_id or web_session.expires_at <= now:
+        return principal, "inactive_chat_session"
+    if not user.active:
+        return principal, "inactive_user"
+    return principal, "ok"
+
+
 async def authenticate_session(request: Request) -> tuple[Principal, WebSession, str]:
     raw = request.cookies.get("urumi_session")
     if not raw:

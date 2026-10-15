@@ -17,3 +17,17 @@ gateway:
     - https://gateway.example.com
   sessionCookieSecure: true
   tlsSecretName: urumi-gateway-tls
+  observability:
+    # Keep trace content capture disabled unless an administrator approves its data handling.
+    captureContent: false
+    traceContentRetentionDays: 7
+  llm:
+    # Set the OpenAI-compatible provider URL and model; store the API key in the Secret.
+    baseUrl: ""
+    model: ""
+    routerModel: ""
+    standardModel: ""
+    complexModel: ""
+    analysisModel: ""
+    providerName: OpenAI-compatible endpoint
+    modelPricing: {}

@@ -55,6 +55,23 @@ gateway:
   discoveryTimeoutSeconds: 5
   probeIntervalSeconds: 30
   apiRpmLimit: 120
+  llm:
+    baseUrl: ""
+    model: ""
+    routerModel: ""
+    standardModel: ""
+    complexModel: ""
+    analysisModel: ""
+    providerName: OpenAI-compatible endpoint
+    modelPricing: {}
+  observability:
+    captureContent: false
+    traceContentRetentionDays: 7
+    analysisPollSeconds: 2
+    analysisLeaseSeconds: 180
+    analysisTimeoutSeconds: 60
+    analysisMaxOutputTokens: 1200
+    analysisMaxTraces: 25
 demoMcp:
   enabled: false
   image: urumi/demo-mcp:0.2.0

@@ -1,6 +1,6 @@
 # System design: Python team MCP gateway
 
-Status: gateway foundation and dashboard control plane implemented 15 October 2026 (ADR 003). The WooCommerce MCP service and store foundation are implemented. The chat agent, live two-user Kubernetes walkthrough and production-like VPS deployment remain later milestones; they are not claimed as verified by this code change.
+Status: gateway foundation, dashboard control plane, backend chat tool loop, model/tool traces, explainable model routing, and an on-demand Lens-inspired investigation workflow are implemented in code (ADRs 003–005). The WooCommerce MCP service and store foundation are implemented. The chat provider is not configured in the current local cluster, so live model token/cost/routing and investigation runs are not yet runtime-verified. The store-order flow, full two-user walkthrough and production-like VPS deployment remain.
 
 ## Scope and boundaries
 
@@ -12,13 +12,15 @@ flowchart LR
     Browser[React browser] -->|HttpOnly session| Edge
     Edge --> Front[React dashboard static server]
     Edge --> Gateway[Python FastAPI gateway: /api and /mcp]
-    Gateway --> DB[(PostgreSQL: users, keys, registry, audits)]
+    Gateway --> DB[(PostgreSQL: users, keys, registry, audits, traces, investigations)]
     Gateway --> WooMCP[Python WooCommerce MCP: internal Service]
     Gateway --> Inventory[Inventory MCP: internal Service]
     Gateway --> Fulfillment[Fulfillment MCP: internal Service]
-    Gateway -. next phase .-> Chat[Chat loop inside backend]
-    Chat -. user identity delegation .-> Gateway
-    Chat -. secret-backed provider key .-> Model[Configured LLM provider]
+    Gateway --> Chat[Chat loop inside backend]
+    Gateway --> Investigations[PostgreSQL-backed trace worker]
+    Chat -->|short-lived signed session assertion| Gateway
+    Chat -->|Kubernetes Secret API key| Model[OpenAI-compatible LLM provider]
+    Investigations -->|bounded redacted trace sample| Model
     WooMCP -->|store REST credential| WP[WordPress + WooCommerce]
     Edge -->|store host| WP
     WP --> Maria[(MariaDB)]
@@ -30,15 +32,15 @@ Only the gateway connects to upstream MCP servers. The browser never knows upstr
 
 - Python 3.12, FastAPI/Starlette, official Python MCP SDK, HTTPX, Pydantic, SQLAlchemy async + asyncpg, Alembic.
 - React + TypeScript + Vite for the dashboard, served as a separate static workload. Dashboard API and MCP routes share the gateway host to simplify cookie and CORS rules.
-- One Python gateway workload initially, with separate modules for administration, authentication, policy, discovery, routing and audit. Chat is a later module; avoid premature microservices while preserving those code boundaries.
+- One Python gateway workload initially, with separate modules for administration, authentication, policy, discovery, routing, audit and the chat tool loop. Avoid premature microservices while preserving those code boundaries.
 - Separate WooCommerce MCP workload; two additional small, real demo upstream services for inventory/fulfillment. Declare demo data clearly. Cross-server example: find today's orders in WooCommerce and match their SKUs against inventory/fulfillment data.
 - Helm owns the store, databases, application Services, Deployments, ingress and policies. Secrets are supplied separately; charts reference Secret names.
 
-`services/gateway/`, `services/demo_mcp/`, `services/woocommerce_mcp/`, and `apps/dashboard/` implement the service boundaries. Locked Python dependencies live in `uv.lock`. The gateway and dashboard are deployed by the same Helm chart as the store. Chat remains planned.
+`services/gateway/`, `services/demo_mcp/`, `services/woocommerce_mcp/`, and `apps/dashboard/` implement the service boundaries. Locked Python dependencies live in `uv.lock`. The gateway and dashboard are deployed by the same Helm chart as the store.
 
 ## Request path and identity
 
-1. HTTP authentication creates a trusted Principal (user ID, role, key ID or dashboard session ID).
+1. HTTP authentication creates a trusted Principal (user ID, role, key ID or dashboard session ID). Dashboard chat requires the normal session cookie and CSRF token; no browser-supplied ID becomes identity.
 2. `tools/list` reads the registry and discovered schemas, excludes disabled servers, filters permissions, and returns deterministic gateway tool names.
 3. `tools/call` resolves a stored routing map. Recheck current key status, current server enablement and permissions; never rely on discovery as authorization.
 4. Insert an audit intent before sending upstream traffic. If audit persistence fails, reject the call before side effects occur.
@@ -49,7 +51,7 @@ Rejected tool attempts (revoked known key, disabled server, denied tool or inval
 
 API keys use a random secret and public lookup ID, with a keyed one-way hash stored in PostgreSQL. Compare digests in constant time. The hashing key is a Kubernetes Secret; API keys are displayed once. Dashboard sessions use separate random, hashed session tokens in HttpOnly cookies, with CSRF protection on writes. Browser-supplied user IDs are never accepted as identity.
 
-Planned chat will be hosted in the gateway backend and call `/mcp` through an MCP client. It must carry the authenticated user's identity into the same authorization and audit path as external clients. The chat implementation and model credential are not present yet; no browser will receive an LLM credential.
+Dashboard chat is hosted in the gateway backend and uses the official MCP client to call the same local `/mcp` endpoint that external clients use. The backend mints a two-minute HMAC-signed assertion bound to the authenticated dashboard user and session; MCP middleware checks its signature, expiry, live WebSession and active user on every request. This keeps the browser's cookie as the only client credential and makes each chat tool call use the same current permission, enablement, routing and audit path. Logging out deletes the source session, which invalidates an assertion immediately. The LLM base URL and model profiles are Helm values; an optional provider key comes only from a Kubernetes Secret. Set a LiteLLM Auto Router alias to delegate task classification, or use the local deterministic rule to send cross-server or multi-step prompts to the complex profile and other prompts to the standard profile. Per invocation, the gateway records model/provider, route tier and reason, token usage, latency and outcome. Cost is estimated from explicit per-model token rates; missing rates are shown as unpriced. By default, traces keep only this metadata. When trace content capture is enabled, the gateway stores bounded, heuristic-redacted user/assistant/tool previews for the short configured TTL; it never stores system prompts or hidden reasoning. Local values enable this only for synthetic demo data; production values disable it. An admin can queue an on-demand investigation over a frozen, bounded sample, add expected behavior and checks, and inspect grouped findings linked to verified evidence. The worker uses the configured analysis model, no tools, explicit model pricing and a per-run cap. The provider is absent in the current local deployment, so model-backed chat and investigation behavior are not yet verified.
 
 ## MCP protocol and session decisions
 
@@ -89,7 +91,7 @@ The current Helm deployment pins the gateway at one replica. Each call checks cu
 
 WordPress stays at one replica because of writable content and background-job semantics. Multiple replicas require RWX/object storage, coordinated cron, shared cache/session review and measured database capacity. Increasing replicas in Helm alone would not solve this. Database failover, replicated storage and backup recovery are separate production work.
 
-## Current persistence model and planned chat data
+## Current persistence model and chat state
 
 | Table | Key responsibilities |
 | --- | --- |
@@ -100,7 +102,13 @@ WordPress stays at one replica because of writable content and background-job se
 | `upstream_servers` | immutable alias, URL, encrypted credential, revision, enabled and health state; member grants are an allowlist on the server row |
 | `discovered_tools` | server FK, original/public tool names, JSON schemas, schema hash, discovery time |
 | `tool_audits` | principal/key, server/tool snapshot, start/end, outcome and error category |
-| Planned chat table | user-owned conversation messages and bounded tool traces, added with the chat phase |
+| `agent_traces` / `agent_observations` | chat-turn summary plus ordered model-generation and gateway-tool spans, usage/cost/latency, routing reason and optional bounded redacted previews |
+| `agent_investigations` / `investigation_runs` / `investigation_findings` | admin-owned expected behavior and checks, frozen trace sample, idempotent queued run, analysis model usage/cost, evidence-linked findings, feedback and resolution state |
+| Chat history | recent user/assistant text is held in dashboard memory and sent back as bounded context; tool calls/results are not persisted as conversation rows, while every dispatched MCP tool call is stored in `tool_audits` |
+
+The Observability dashboard combines chat-generation telemetry with existing MCP tool audits. It shows model calls, token counts, configured-price estimates, unpriced call counts, p95 latency, server tool health and step-level traces. Members can inspect only their own traces; admins can inspect the workspace. The first implementation reads a bounded 1–30 day window from PostgreSQL and is intended for the assessment workload, not a high-volume analytics store. The admin-only Investigations view samples at most the configured trace count (25 by default), limits input and output size, records model usage/cost, validates every evidence quote against the source step, and makes no unsupported claim when evidence is missing. The current version is on-demand only; it does not export Prometheus metrics, ingest third-party OTLP traces, schedule monitoring, or manage evaluation datasets. It should not be described as equivalent to Lens at swarm scale.
+
+Trace previews are best-effort redacted and still sensitive. They are cleared within five minutes after the configured TTL (7 days by default). Investigation run/finding metadata currently has no purge policy, which must be decided before production use. See [ADR 005](decisions/005-lens-inspired-investigations.md) and the [Lens reference study](research/litellm-lens-reference.md).
 
 Use foreign keys and transactions. Removed servers and users must not erase historical audits; keep snapshots or soft-delete records. Do not store raw credentials, API keys, customer addresses or full tool payloads in audit metadata.
 
@@ -133,3 +141,5 @@ References checked 12 October 2026:
 - https://developer.woocommerce.com/docs/apis/rest-api/
 
 Research informs our design; these products are not substituted for the gateway we must implement.
+
+Additional references for traces and routing: [Langfuse token and cost tracking](https://langfuse.com/docs/observability/features/token-and-cost-tracking), [Langfuse trace best practices](https://langfuse.com/docs/observability/best-practices), and [LiteLLM Lens](https://docs.litellm.ai/blog/litellm-lens-launch). See [ADR 004](decisions/004-chat-observability-and-routing.md) for the adopted subset and known limits.

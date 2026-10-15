@@ -17,9 +17,10 @@ from .api import create_api_router
 from .bootstrap import bootstrap_workspace
 from .config import Settings
 from .db import make_database
+from .investigations import investigation_worker
 from .mcp_gateway import build_mcp_server
 from .models import ApiKey, ToolAudit, User, now_utc
-from .security import authenticate_api_key
+from .security import authenticate_api_key, authenticate_chat_assertion
 from .upstreams import UpstreamManager
 
 logger = logging.getLogger("urumi.gateway")
@@ -51,11 +52,14 @@ class MCPKeyMiddleware(BaseHTTPMiddleware):
                 headers={"WWW-Authenticate": "Bearer"},
             )
         async with self.sessions() as session:
-            principal, reason = await authenticate_api_key(session, token, self.settings)
+            if token.startswith("chatv1."):
+                principal, reason = await authenticate_chat_assertion(session, token, self.settings)
+            else:
+                principal, reason = await authenticate_api_key(session, token, self.settings)
             if principal is None or reason != "ok":
                 key_id = token[4:].partition(".")[0] if token.startswith("urm_") else None
-                user_email = None
-                user_id = None
+                user_email = principal.email if principal else None
+                user_id = principal.user_id if principal else None
                 if key_id:
                     key = await session.get(ApiKey, key_id)
                     if key:
@@ -72,7 +76,8 @@ class MCPKeyMiddleware(BaseHTTPMiddleware):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
         now = time.monotonic()
-        window = self.request_times[principal.key_id or "unknown"]
+        rate_key = principal.key_id or f"user:{principal.user_id}"
+        window = self.request_times[rate_key]
         while window and window[0] <= now - 60:
             window.popleft()
         if len(window) >= self.settings.api_rpm_limit:
@@ -148,13 +153,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await bootstrap_workspace(sessions, settings)
         await upstreams.refresh_all()
         task = asyncio.create_task(_probe_loop(upstreams, settings), name="mcp-discovery")
+        analysis_task = asyncio.create_task(
+            investigation_worker(sessions, settings), name="trace-investigations"
+        )
         try:
             async with mcp.session_manager.run():
                 yield
         finally:
             task.cancel()
+            analysis_task.cancel()
             try:
                 await task
+            except asyncio.CancelledError:
+                pass
+            try:
+                await analysis_task
             except asyncio.CancelledError:
                 pass
             await upstreams.close()

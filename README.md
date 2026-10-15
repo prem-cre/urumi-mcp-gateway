@@ -6,7 +6,7 @@ A Python MCP gateway and React dashboard for a Kubernetes-hosted WooCommerce sto
 
 The store, WooCommerce MCP adapter and team gateway control plane/data plane are implemented. The gateway aggregates WooCommerce plus two sample MCP sources through one Streamable HTTP endpoint. It supports admin/member accounts, invitations, individually hashed/revocable API keys, member tool grants, server registry controls, health discovery and attributed audit logs. The live dashboard uses the gateway API.
 
-The dashboard chat/LLM tool loop, store-order flow and VPS deployment remain later milestones. Local gateway verification has exercised three-source routing, member permissions, invitations, key revocation, disable filtering, dead-upstream isolation and NetworkPolicy isolation. The architecture and threat model distinguish implemented controls from planned controls.
+The dashboard chat/LLM tool loop, first-party Observability page and an on-demand, Lens-inspired trace investigation workflow are implemented. Chat tool calls use the same authenticated MCP gateway path; traces include model/tool steps, token usage, configured-rate cost estimates, latency and model-routing explanations. Admins can define expected behavior and checks, analyze a bounded sample of redacted previews, and review findings linked to source traces. Local values enable preview capture for synthetic demo data; production values disable it. The local cluster currently has no model provider configured, so real usage, cost, routing and investigation runs remain unverified; the store-order demo flow and VPS deployment also remain. Local gateway verification has exercised three-source routing, member permissions, invitations, key revocation, disable filtering, dead-upstream isolation and NetworkPolicy isolation. The architecture and threat model distinguish implemented controls from planned controls.
 
 ## Local setup
 
@@ -29,7 +29,7 @@ If `.localhost` does not resolve in your browser, add `127.0.0.1 store.localhost
 
 For the local gateway demo, sign in as the bootstrap admin, invite a second user under **Team**, complete their one-time invite, and generate a separate MCP key from each account. In MCP Inspector, select Streamable HTTP, configure the gateway URL and set `Authorization: Bearer <user-key>`. Never use a real customer or payment credential in the demo store.
 
-The **Servers** view shows WooCommerce, inventory and fulfillment status/catalogs, grants, and admin controls to register, refresh, enable, disable and remove upstreams. **Team** handles invitations and keys. **Activity** shows outcomes and call duration. Each call rechecks live user-key revocation, server enablement and grants, and audit intent is committed before any upstream tool dispatch.
+The **Assistant** view sends model-selected calls through the same `/mcp` route, using the logged-in user session and showing the called tools and selected route. Configure its provider URL/model profiles, optional pricing map and Kubernetes Secret key using the chat setup section in [deployment instructions](docs/deployment.md). **Observability** shows team-scoped model usage and estimated costs, latency and ordered traces. Admins can use **Investigations** to compare captured traces with expected behavior, review evidence-backed findings and mark behavior expected/resolved. Content capture is heuristic-redacted and still sensitive; use synthetic demo data. The **Servers** view shows WooCommerce, inventory and fulfillment status/catalogs, grants, and admin controls to register, refresh, enable, disable and remove upstreams. **Team** handles invitations and keys. **Activity** shows outcomes and call duration. Each MCP tool call rechecks live identity, server enablement and grants, and audit intent is committed before dispatch.
 
 See [gateway operations](services/gateway/README.md) for the MCP request path and endpoints. See [deployment instructions](docs/deployment.md) for checkout, Kubernetes resources, local domains and the production-like Helm values path.
 
@@ -39,6 +39,9 @@ See [gateway operations](services/gateway/README.md) for the MCP request path an
 - [ADR 001: platform foundation](docs/decisions/001-foundation.md)
 - [ADR 002: WooCommerce MCP adapter](docs/decisions/002-woocommerce-mcp.md)
 - [ADR 003: team MCP gateway](docs/decisions/003-team-gateway.md)
+- [ADR 004: chat observability and routing](docs/decisions/004-chat-observability-and-routing.md)
+- [ADR 005: Lens-inspired investigations](docs/decisions/005-lens-inspired-investigations.md)
+- [LiteLLM Lens product and codebase study](docs/research/litellm-lens-reference.md)
 - [Scope and assessment checklist](docs/scope.md)
 - [Threat model](docs/threat-model.md)
 - [Local/VPS setup, upgrades and rollback](docs/deployment.md)
