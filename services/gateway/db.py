@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 
+from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -16,6 +17,6 @@ def make_database(database_url: str):
     return engine, sessions
 
 
-async def session_dependency(request) -> AsyncIterator[AsyncSession]:
+async def session_dependency(request: Request) -> AsyncIterator[AsyncSession]:
     async with request.app.state.sessions() as session:
         yield session

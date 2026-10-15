@@ -24,7 +24,7 @@ Member permissions use an allowlist of original upstream tool names on each serv
 
 ## Sessions, outages and writes
 
-The gateway keeps one upstream MCP client session per server ID/revision. Operations against one server are serialized, which preserves session safety without allowing a blocked server to lock another server. Changes to URL, credential, enablement or removal increment the revision and schedule connection invalidation. The downstream server uses stateless JSON Streamable HTTP, so each call carries the user key and observes current revocation.
+The gateway keeps one upstream MCP client session per server ID/revision. A dedicated asyncio worker owns each SDK session and its AnyIO task group, processes that server's commands serially, and closes the session itself when it receives an invalidation command. This avoids cross-task transport cleanup while preserving session behavior. Separate server workers keep a blocked upstream from locking another server. Changes to URL, credential, enablement or removal increment the revision and schedule connection invalidation. The downstream server uses stateless JSON Streamable HTTP, so each call carries the user key and observes current revocation.
 
 Health refresh has independent deadlines. A failed upstream retains its last catalog and is marked unreachable; other catalogs and calls are not blocked. A call to an unreachable upstream returns a clear error. Gateway readiness depends on PostgreSQL, not upstream health. This version has no circuit breaker, global in-flight semaphore or distributed rate limiter. The local rate limiter is per process, and Helm fixes the gateway at one replica.
 

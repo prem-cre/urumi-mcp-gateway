@@ -122,6 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     engine, sessions = make_database(settings.database_url)
     upstreams = UpstreamManager(sessions, settings)
+    mcp = build_mcp_server(sessions, settings, upstreams)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -148,7 +149,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await upstreams.refresh_all()
         task = asyncio.create_task(_probe_loop(upstreams, settings), name="mcp-discovery")
         try:
-            yield
+            async with mcp.session_manager.run():
+                yield
         finally:
             task.cancel()
             try:
@@ -179,6 +181,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return JSONResponse({"status": "not_ready"}, status_code=503)
         return {"status": "ready"}
 
-    mcp = build_mcp_server(sessions, settings, upstreams)
     app.mount("/", mcp.streamable_http_app())
     return app

@@ -14,6 +14,7 @@ from starlette.requests import Request
 from .models import DiscoveredTool, ToolAudit, UpstreamServer, now_utc
 from .security import Principal, decrypt_credential
 from .upstreams import (
+    UpstreamBusyError,
     UpstreamCallError,
     UpstreamManager,
     UpstreamTimeoutError,
@@ -259,9 +260,14 @@ def build_mcp_server(sessions, settings, upstreams: UpstreamManager) -> FastMCP:
             response = _error(
                 "The upstream rejected its configured credential. Check the server credential."
                 if category == "upstream_auth_failed"
+                else "The upstream could not be reached; the tool was not dispatched."
+                if category == "upstream_unreachable"
                 else "The connection ended after dispatch. The operation may have completed; "
                 "check the upstream state before trying again."
             )
+        except UpstreamBusyError:
+            outcome, category = "failed", "upstream_busy"
+            response = _error("This upstream is handling another request. Try again shortly.")
         except Exception as exc:  # noqa: BLE001 - contain unexpected MCP/DB failures at the protocol boundary.
             from .upstreams import safe_error
 
@@ -291,9 +297,10 @@ def build_mcp_server(sessions, settings, upstreams: UpstreamManager) -> FastMCP:
             if server:
                 server.last_check_at = now_utc()
                 server.last_error = category
-                server.failure_count += 1
-                if server.enabled and category != "audit_finalization_error":
-                    server.status = "unreachable"
+                if category != "upstream_busy":
+                    server.failure_count += 1
+                    if server.enabled and category != "audit_finalization_error":
+                        server.status = "unreachable"
             await session.commit()
         return response
 

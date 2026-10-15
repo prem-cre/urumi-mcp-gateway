@@ -26,11 +26,13 @@ Upstream credentials are encrypted in PostgreSQL with a Fernet key supplied by a
 
 ## Failure and concurrency behavior
 
-- One persistent upstream MCP session is retained per server ID and registry revision. Calls and discovery for that server are serialized because MCP session concurrency behavior differs between upstreams. Different upstreams operate concurrently and have independent deadlines.
+- One persistent upstream MCP session is retained per server ID and registry revision. A dedicated asyncio worker owns the SDK session and processes its commands serially, so the SDK's AnyIO task group is always closed by its owning task. Different upstreams have independent workers, so one slow or dead server does not block the others.
 - A periodic discovery check refreshes the PostgreSQL catalog. A failed probe preserves the last known catalog and marks that server unreachable; the gateway still lists other healthy servers. Calls to a known-unreachable server fail clearly. Disabling a server immediately removes its tools from `tools/list` and blocks direct calls.
 - A timeout before tool dispatch is a known failure. A timeout or transport interruption after dispatch is `unknown_outcome`; writes are never replayed automatically. The caller must inspect the upstream state before retrying.
 - Audit intent is committed before dispatch. If the gateway restarts with an `in_progress` audit row, startup marks it `unknown_outcome` because the side effect may have occurred.
 - The demo deployment uses one gateway replica. Its rate limit is in-process and is not a global limit across replicas. Scale-out, shared rate limiting and metrics export are later production work.
+
+The app lifespan starts the downstream MCP session manager and owns upstream worker shutdown. Registry changes queue a worker close command; they never close an SDK session from an unrelated dashboard request task. Discovery exceptions from the SDK can be wrapped in exception groups, so transport classification checks nested causes before updating health status.
 
 ## Run locally
 
@@ -49,7 +51,7 @@ Both scripts set `KUBECONFIG` to the repository's `.local/kubeconfig`. The deplo
 
 Sign in with the local bootstrap credentials from `.local/credentials.json`. Invite a second user under **Team**, copy the one-time link privately, and complete account setup. Each user generates their own MCP key in **Team**. In MCP Inspector, select Streamable HTTP, enter the gateway URL and set `Authorization: Bearer <user-key>`.
 
-Use **Servers** to inspect the three discovered catalogs, grant member tools, connect an additional HTTPS MCP server, refresh health, disable or remove a server. The **Activity** page shows permitted calls and rejections. The assistant page intentionally indicates the next milestone; the chat-to-gateway LLM loop has not been added in this gateway phase.
+Use **Servers** to inspect the three discovered catalogs, grant member tools, connect an additional HTTPS MCP server, refresh health, disable or remove a server. The **Activity** page shows permitted calls and rejections. Local verification covers invitation/login, member write denial, key revocation, three-source routing, disable/catalog filtering, dead-upstream recovery and NetworkPolicy isolation. The assistant page indicates the next milestone; the chat-to-gateway LLM loop has not been added in this gateway phase.
 
 ## Endpoints
 

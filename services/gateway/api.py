@@ -7,8 +7,17 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
+from email_validator import validate_email
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,8 +43,23 @@ SessionUser = Annotated[Principal, Depends(require_session)]
 AdminUser = Annotated[Principal, Depends(require_admin)]
 
 
+def _normalize_email(value: str) -> str:
+    return validate_email(
+        value,
+        check_deliverability=False,
+        test_environment=True,
+    ).normalized
+
+
+EmailAddress = Annotated[
+    str,
+    BeforeValidator(_normalize_email),
+    StringConstraints(min_length=3, max_length=320),
+]
+
+
 class LoginBody(BaseModel):
-    email: EmailStr
+    email: EmailAddress
     password: SecretStr
 
 
@@ -44,14 +68,14 @@ class KeyBody(BaseModel):
 
 
 class InvitationBody(BaseModel):
-    email: EmailStr
+    email: EmailAddress
     display_name: str = Field(min_length=1, max_length=120)
     role: Literal["member", "admin"] = "member"
 
 
 class AcceptInvitationBody(BaseModel):
     token: str = Field(min_length=30, max_length=180)
-    email: EmailStr
+    email: EmailAddress
     password: SecretStr
 
     @field_validator("password")
@@ -364,6 +388,7 @@ def create_api_router() -> APIRouter:
         db.add(server)
         await db.commit()
         await request.app.state.upstreams.refresh_one(server.id)
+        await db.refresh(server)
         return await _load_server_view(db, server.id, principal)
 
     @router.patch("/servers/{server_id}")
@@ -425,6 +450,7 @@ def create_api_router() -> APIRouter:
             request.app.state.upstreams.schedule_invalidation(server.id)
         if connection_changed or body.enabled is True:
             await request.app.state.upstreams.refresh_one(server.id)
+            await db.refresh(server)
         return await _load_server_view(db, server.id, principal)
 
     @router.delete("/servers/{server_id}")
@@ -458,6 +484,7 @@ def create_api_router() -> APIRouter:
         if server is None or server.deleted_at is not None:
             raise HTTPException(404, "MCP server not found")
         ok, reason = await request.app.state.upstreams.refresh_one(server.id)
+        await db.refresh(server)
         result = await _load_server_view(db, server.id, principal)
         result["refresh_ok"] = ok
         result["refresh_error"] = reason

@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 import uuid
 from contextlib import AsyncExitStack
@@ -21,6 +22,7 @@ from .models import DiscoveredTool, UpstreamServer, now_utc
 from .security import decrypt_credential, validate_upstream_url
 
 _TOOL_NAME = re.compile(r"[^A-Za-z0-9_-]+")
+logger = logging.getLogger("urumi.gateway.upstreams")
 
 
 @dataclass(frozen=True)
@@ -35,10 +37,20 @@ class ServerConfig:
 
 
 @dataclass
-class UpstreamConnection:
+class UpstreamCommand:
+    kind: str
+    timeout: float
+    future: asyncio.Future
+    name: str | None = None
+    arguments: dict | None = None
+    dispatched: bool = False
+
+
+@dataclass
+class UpstreamWorker:
     revision: int
-    stack: AsyncExitStack
-    session: ClientSession
+    queue: asyncio.Queue
+    task: asyncio.Task
 
 
 class UpstreamTimeoutError(Exception):
@@ -52,7 +64,7 @@ class UpstreamBusyError(Exception):
 
 
 class UpstreamCallError(Exception):
-    """A transport/protocol failure after dispatch may have left a write uncertain."""
+    """A transport/protocol failure with dispatch certainty attached."""
 
     def __init__(
         self, outcome_unknown: bool = True, category: str = "upstream_transport_interrupted"
@@ -91,7 +103,7 @@ class UpstreamManager:
         self.sessions = sessions
         self.settings = settings
         self._operation_locks: dict[uuid.UUID, asyncio.Lock] = {}
-        self._connections: dict[uuid.UUID, UpstreamConnection] = {}
+        self._workers: dict[uuid.UUID, UpstreamWorker] = {}
         self._invalidation_tasks: set[asyncio.Task] = set()
 
     def _operation_lock(self, server_id: uuid.UUID) -> asyncio.Lock:
@@ -114,39 +126,138 @@ class UpstreamManager:
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
         )
 
-    async def _connection(self, server: ServerConfig, timeout: float) -> UpstreamConnection:
-        current = self._connections.get(server.id)
-        if current and current.revision == server.revision:
+    async def _worker_locked(self, server: ServerConfig) -> UpstreamWorker:
+        current = self._workers.get(server.id)
+        if current and current.revision == server.revision and not current.task.done():
             return current
         if current:
-            await self._discard_locked(server.id)
-        stack = AsyncExitStack()
-        await stack.__aenter__()
-        try:
-            http_client = await self._client(server, timeout)
-            await stack.enter_async_context(http_client)
-            read_stream, write_stream, _ = await stack.enter_async_context(
-                streamable_http_client(server.url, http_client=http_client)
-            )
-            client_session = ClientSession(read_stream, write_stream)
-            await stack.enter_async_context(client_session)
-            async with asyncio.timeout(timeout):
-                await client_session.initialize()
-            connection = UpstreamConnection(server.revision, stack, client_session)
-            self._connections[server.id] = connection
-            return connection
-        except BaseException:
-            await stack.aclose()
-            raise
+            await self._stop_worker_locked(server.id)
+        queue = asyncio.Queue(maxsize=max(4, self.settings.upstream_concurrency * 4))
+        task = asyncio.create_task(
+            self._run_worker(server, queue), name=f"mcp-upstream-{server.alias}"
+        )
+        worker = UpstreamWorker(server.revision, queue, task)
+        self._workers[server.id] = worker
+        return worker
 
-    async def _discard_locked(self, server_id: uuid.UUID) -> None:
-        connection = self._connections.pop(server_id, None)
-        if connection is not None:
-            await connection.stack.aclose()
+    async def _enqueue_locked(
+        self,
+        server: ServerConfig,
+        kind: str,
+        timeout: float,
+        name: str | None = None,
+        arguments: dict | None = None,
+    ) -> UpstreamCommand:
+        worker = await self._worker_locked(server)
+        future = asyncio.get_running_loop().create_future()
+        future.add_done_callback(_consume_future_exception)
+        command = UpstreamCommand(kind, timeout, future, name, arguments)
+        try:
+            worker.queue.put_nowait(command)
+        except asyncio.QueueFull as exc:
+            raise UpstreamBusyError("upstream_queue_full") from exc
+        return command
+
+    async def _run_worker(self, server: ServerConfig, queue: asyncio.Queue) -> None:
+        """Own the upstream MCP session in one task for its entire lifetime.
+
+        The Python MCP client's Streamable HTTP transport owns an AnyIO task group.
+        Keeping the session in a dedicated worker avoids closing that task group from
+        a different HTTP request task when a server is edited, disabled, or removed.
+        """
+        stack: AsyncExitStack | None = None
+        client_session: ClientSession | None = None
+        while True:
+            command = await queue.get()
+            if command.kind == "close":
+                if stack is not None:
+                    await _close_stack(stack)
+                if not command.future.done():
+                    command.future.set_result(None)
+                return
+
+            try:
+                async with asyncio.timeout(command.timeout):
+                    if client_session is None:
+                        stack = AsyncExitStack()
+                        await stack.__aenter__()
+                        try:
+                            http_client = await self._client(server, command.timeout)
+                            await stack.enter_async_context(http_client)
+                            read_stream, write_stream, _ = await stack.enter_async_context(
+                                streamable_http_client(server.url, http_client=http_client)
+                            )
+                            client_session = ClientSession(read_stream, write_stream)
+                            await stack.enter_async_context(client_session)
+                            await client_session.initialize()
+                        except BaseException:
+                            await _close_stack(stack)
+                            stack = None
+                            client_session = None
+                            raise
+
+                    if command.kind == "list_tools":
+                        result = await self._list_session_tools(client_session)
+                    elif command.kind == "call_tool":
+                        command.dispatched = True
+                        result = await client_session.call_tool(
+                            command.name or "", command.arguments or {}
+                        )
+                    else:
+                        raise ValueError("unknown_upstream_operation")
+                if not command.future.done():
+                    command.future.set_result(result)
+            except asyncio.CancelledError:
+                if stack is not None:
+                    await _close_stack(stack)
+                    stack = None
+                    client_session = None
+                if not command.future.done():
+                    command.future.set_exception(
+                        UpstreamCallError(
+                            command.dispatched,
+                            "upstream_transport_interrupted"
+                            if command.dispatched
+                            else "upstream_unreachable",
+                        )
+                    )
+                raise
+            except Exception as exc:  # noqa: BLE001 - normalize SDK/transport failures for this command.
+                if stack is not None:
+                    await _close_stack(stack)
+                    stack = None
+                    client_session = None
+                if not command.future.done():
+                    command.future.set_exception(_operation_error(exc, command.dispatched))
+
+    async def _list_session_tools(self, session: ClientSession) -> list[Tool]:
+        tools: list[Tool] = []
+        cursor = None
+        for _ in range(20):
+            result = await session.list_tools(cursor=cursor)
+            tools.extend(result.tools)
+            if len(tools) > 500:
+                raise ValueError("upstream_tool_catalog_too_large")
+            cursor = result.nextCursor
+            if not cursor:
+                return tools
+        raise ValueError("upstream_tool_catalog_too_large")
+
+    async def _stop_worker_locked(self, server_id: uuid.UUID) -> None:
+        worker = self._workers.pop(server_id, None)
+        if worker is None:
+            return
+        if worker.task.done():
+            await asyncio.gather(worker.task, return_exceptions=True)
+            return
+        future = asyncio.get_running_loop().create_future()
+        await worker.queue.put(UpstreamCommand("close", 1, future))
+        await future
+        await asyncio.gather(worker.task, return_exceptions=True)
 
     async def invalidate_server(self, server_id: uuid.UUID) -> None:
         async with self._operation_lock(server_id):
-            await self._discard_locked(server_id)
+            await self._stop_worker_locked(server_id)
 
     def schedule_invalidation(self, server_id: uuid.UUID) -> None:
         task = asyncio.create_task(self.invalidate_server(server_id))
@@ -157,7 +268,7 @@ class UpstreamManager:
         if self._invalidation_tasks:
             await asyncio.gather(*self._invalidation_tasks, return_exceptions=True)
         await asyncio.gather(
-            *(self.invalidate_server(server_id) for server_id in list(self._connections))
+            *(self.invalidate_server(server_id) for server_id in list(self._workers))
         )
 
     async def list_tools(
@@ -171,24 +282,13 @@ class UpstreamManager:
                 await lock.acquire()
         except TimeoutError as exc:
             raise UpstreamBusyError("upstream_busy") from exc
+        command = None
         try:
             async with asyncio.timeout(limit):
-                connection = await self._connection(config, limit)
-                try:
-                    tools: list[Tool] = []
-                    cursor = None
-                    for _ in range(20):
-                        result = await connection.session.list_tools(cursor=cursor)
-                        tools.extend(result.tools)
-                        if len(tools) > 500:
-                            raise ValueError("upstream_tool_catalog_too_large")
-                        cursor = result.nextCursor
-                        if not cursor:
-                            return tools
-                    raise ValueError("upstream_tool_catalog_too_large")
-                except Exception:
-                    await self._discard_locked(config.id)
-                    raise
+                command = await self._enqueue_locked(config, "list_tools", limit)
+                return await asyncio.shield(command.future)
+        except TimeoutError as exc:
+            raise UpstreamTimeoutError(command.dispatched if command else False) from exc
         finally:
             lock.release()
 
@@ -299,32 +399,71 @@ class UpstreamManager:
     ) -> CallToolResult:
         timeout = min(max(server_timeout(server, self.settings), 1.0), 60.0)
         lock = self._operation_lock(server.id)
-        dispatched = False
+        command = None
+        acquired = False
         try:
             async with asyncio.timeout(timeout):
-                async with lock:
-                    connection = await self._connection(server, timeout)
-                    dispatched = True
-                    try:
-                        return await connection.session.call_tool(original_name, arguments)
-                    except TimeoutError as exc:
-                        await self._discard_locked(server.id)
-                        raise UpstreamTimeoutError(True) from exc
-                    except httpx.TimeoutException as exc:
-                        await self._discard_locked(server.id)
-                        raise UpstreamTimeoutError(True) from exc
-                    except httpx.HTTPStatusError as exc:
-                        await self._discard_locked(server.id)
-                        if exc.response.status_code in {401, 403}:
-                            raise UpstreamCallError(False, "upstream_auth_failed") from exc
-                        raise UpstreamCallError() from exc
-                    except Exception as exc:
-                        await self._discard_locked(server.id)
-                        raise UpstreamCallError() from exc
+                await lock.acquire()
+                acquired = True
+                command = await self._enqueue_locked(
+                    server, "call_tool", timeout, original_name, arguments
+                )
+                return await asyncio.shield(command.future)
         except TimeoutError as exc:
             # A timeout while waiting for a session or initializing is known not to have called the tool.
             # Once call_tool has begun, the upstream may have committed a write without returning a reply.
-            raise UpstreamTimeoutError(dispatched) from exc
+            raise UpstreamTimeoutError(command.dispatched if command else False) from exc
+        finally:
+            if acquired:
+                lock.release()
+
+
+def _consume_future_exception(future: asyncio.Future) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
+async def _close_stack(stack: AsyncExitStack) -> None:
+    try:
+        await stack.aclose()
+    except Exception as exc:  # noqa: BLE001 - cleanup errors are contained after a failed request.
+        logger.warning("Failed to close an upstream MCP session (%s)", type(exc).__name__)
+
+
+def _operation_error(exc: BaseException, dispatched: bool) -> BaseException:
+    if isinstance(exc, UpstreamTimeoutError):
+        return exc
+    causes = list(_nested_exceptions(exc))
+    if any(isinstance(cause, (TimeoutError, httpx.TimeoutException)) for cause in causes):
+        return UpstreamTimeoutError(dispatched)
+    for cause in causes:
+        if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code in {401, 403}:
+            return UpstreamCallError(False, "upstream_auth_failed")
+    if dispatched:
+        return UpstreamCallError()
+    return exc
+
+
+def _nested_exceptions(exc: BaseException):
+    if isinstance(exc, BaseExceptionGroup):
+        for nested in exc.exceptions:
+            yield from _nested_exceptions(nested)
+    else:
+        yield exc
+
+
+def _transport_error(exc: BaseException) -> str | None:
+    causes = list(_nested_exceptions(exc))
+    if any(isinstance(cause, (TimeoutError, httpx.TimeoutException)) for cause in causes):
+        return "upstream_timeout"
+    if any(isinstance(cause, httpx.ConnectError) for cause in causes):
+        return "upstream_unreachable"
+    for cause in causes:
+        if isinstance(cause, httpx.HTTPStatusError):
+            if cause.response.status_code in {401, 403}:
+                return "upstream_auth_failed"
+            return "upstream_http_error"
+    return None
 
 
 def server_timeout(server: UpstreamServer, settings: Settings) -> float:
@@ -333,15 +472,7 @@ def server_timeout(server: UpstreamServer, settings: Settings) -> float:
 
 
 def safe_error(exc: Exception) -> str:
-    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
-        return "upstream_timeout"
-    if isinstance(exc, httpx.ConnectError):
-        return "upstream_unreachable"
-    if isinstance(exc, httpx.HTTPStatusError):
-        if exc.response.status_code in {401, 403}:
-            return "upstream_auth_failed"
-        return "upstream_http_error"
-    return "upstream_protocol_error"
+    return _transport_error(exc) or "upstream_protocol_error"
 
 
 def result_size(result: CallToolResult) -> int:

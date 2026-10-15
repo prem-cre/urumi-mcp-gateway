@@ -6,7 +6,7 @@ A Python MCP gateway and React dashboard for a Kubernetes-hosted WooCommerce sto
 
 The store, WooCommerce MCP adapter and team gateway control plane/data plane are implemented. The gateway aggregates WooCommerce plus two sample MCP sources through one Streamable HTTP endpoint. It supports admin/member accounts, invitations, individually hashed/revocable API keys, member tool grants, server registry controls, health discovery and attributed audit logs. The live dashboard uses the gateway API.
 
-The dashboard chat/LLM tool loop, complete reproducible two-user acceptance demo, and VPS deployment have not yet been verified. They are the next milestones. The architecture and threat model distinguish implemented controls from planned controls.
+The dashboard chat/LLM tool loop, store-order flow and VPS deployment remain later milestones. Local gateway verification has exercised three-source routing, member permissions, invitations, key revocation, disable filtering, dead-upstream isolation and NetworkPolicy isolation. The architecture and threat model distinguish implemented controls from planned controls.
 
 ## Local setup
 
@@ -62,6 +62,7 @@ docs/                        Architecture, tradeoffs, scope and security notes
 
 ```sh
 make check
+uv run pytest services/gateway/tests -q
 ```
 
 `make check` runs Ruff formatting/lint and Helm lint/rendering for local and production-like values. `make verify` checks the local store; `make checkout` creates a real dummy COD order. `./scripts/verify-network.sh` checks local network isolation. These runtime checks require the dedicated `.local/kubeconfig`; `make checkout` creates a store order.
