@@ -23,7 +23,10 @@ spec:
         - name: database-migrations
           image: {{ .Values.gateway.image | quote }}
           imagePullPolicy: {{ .Values.gateway.imagePullPolicy }}
-          command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+          # Dependencies are installed in the image at build time. Run Alembic
+          # directly so the read-only, non-root init container does not need a
+          # writable uv cache directory at runtime.
+          command: ["alembic", "upgrade", "head"]
           env:
             - name: GATEWAY_DB_PASSWORD
               valueFrom: {secretKeyRef: {name: {{ .Values.gatewayDatabase.existingSecret }}, key: password}}

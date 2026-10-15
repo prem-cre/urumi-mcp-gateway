@@ -77,13 +77,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     if settings.kind == "inventory":
 
-        @mcp.tool(annotations=read, structured_output=True)
+        @mcp.tool(annotations=read, structured_output=False)
         async def check_stock(sku: Annotated[str, Field(min_length=1, max_length=64)]) -> dict:
             """Look up sample on-hand stock for a store product SKU."""
             item = next((row for row in INVENTORY if row["sku"].lower() == sku.lower()), None)
             return item or {"sku": sku, "available": 0, "warehouse": None, "found": False}
 
-        @mcp.tool(annotations=read, structured_output=True)
+        @mcp.tool(annotations=read, structured_output=False)
         async def list_inventory(
             page: Annotated[int, Field(ge=1, le=10)] = 1,
             per_page: Annotated[int, Field(ge=1, le=20)] = 20,
@@ -98,7 +98,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             start = (page - 1) * per_page
             return {"items": rows[start : start + per_page], "page": page, "total": len(rows)}
 
-        @mcp.tool(annotations=read, structured_output=True)
+        @mcp.tool(annotations=read, structured_output=False)
         async def get_low_stock(threshold: Annotated[int, Field(ge=0, le=100)] = 10) -> dict:
             """List sample inventory items at or below a requested stock threshold."""
             return {
@@ -108,7 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     else:
 
-        @mcp.tool(annotations=read, structured_output=True)
+        @mcp.tool(annotations=read, structured_output=False)
         async def get_shipment(
             shipment_id: Annotated[str, Field(min_length=4, max_length=32)],
         ) -> dict:
@@ -122,7 +122,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 {"shipment_id": shipment_id, "found": False, "source": "sample data"},
             )
 
-        @mcp.tool(annotations=read, structured_output=True)
+        @mcp.tool(annotations=read, structured_output=False)
         async def list_shipments(
             page: Annotated[int, Field(ge=1, le=10)] = 1,
             per_page: Annotated[int, Field(ge=1, le=20)] = 20,
@@ -135,14 +135,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "total": len(SAMPLE_SHIPMENTS),
             }
 
-        @mcp.tool(annotations=read, structured_output=True)
+        @mcp.tool(annotations=read, structured_output=False)
         async def get_delivery_estimate(
             postal_code: Annotated[str, Field(pattern=r"^[0-9]{6}$")],
         ) -> dict:
             """Return a sample delivery estimate for a six-digit Indian postal code."""
             return {"postal_code": postal_code, "business_days": 3, "source": "sample estimate"}
 
-        @mcp.tool(annotations=read, structured_output=True)
+        @mcp.tool(annotations=read, structured_output=False)
         async def list_carriers() -> dict:
             """List carriers available in the sample fulfillment data."""
             return {"carriers": ["Blue Dart", "Delhivery", "India Post"], "source": "sample data"}
