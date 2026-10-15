@@ -83,6 +83,47 @@
     "gatewayDatabase": {
       "$ref": "#/definitions/workload"
     },
+    "gateway": {
+      "type": "object",
+      "required": ["enabled", "image", "imagePullPolicy", "existingSecret", "dashboardHost", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string", "minLength": 1},
+        "imagePullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]},
+        "existingSecret": {"type": "string", "minLength": 1},
+        "adminEmail": {"type": "string", "format": "email"},
+        "adminName": {"type": "string", "minLength": 1},
+        "dashboardHost": {"type": "string", "minLength": 1},
+        "mcpAllowedHosts": {"type": "array", "items": {"type": "string"}},
+        "mcpAllowedOrigins": {"type": "array", "items": {"type": "string"}},
+        "tlsSecretName": {"type": "string"},
+        "sessionCookieSecure": {"type": "boolean"},
+        "toolTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
+        "discoveryTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 30},
+        "probeIntervalSeconds": {"type": "integer", "minimum": 5},
+        "apiRpmLimit": {"type": "integer", "minimum": 1},
+        "resources": {"type": "object", "required": ["requests", "limits"]}
+      }
+    },
+    "demoMcp": {
+      "type": "object",
+      "required": ["enabled", "image", "existingSecret", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string", "minLength": 1},
+        "existingSecret": {"type": "string", "minLength": 1},
+        "resources": {"type": "object", "required": ["requests", "limits"]}
+      }
+    },
+    "dashboard": {
+      "type": "object",
+      "required": ["enabled", "image", "resources"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "image": {"type": "string", "minLength": 1},
+        "resources": {"type": "object", "required": ["requests", "limits"]}
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "required": [

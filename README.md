@@ -1,70 +1,69 @@
-# Urumi MCP Gateway
+# Urumi Team MCP Gateway
 
-A Python team MCP gateway with a React dashboard, a tool-using chat agent and a Kubernetes-hosted WooCommerce store. Built for the Urumi AI FDE Internship assessment.
+A Python MCP gateway and React dashboard for a Kubernetes-hosted WooCommerce store. This repository is being built for the Urumi AI FDE Internship assessment.
 
 ## Current status
 
-The repository/system design and Kubernetes store foundation are implemented. The store uses WordPress + WooCommerce, MariaDB and persistent content/database volumes. PostgreSQL is deployed for the upcoming gateway. Helm defines local and production-like values, probes, resources, ingress and network boundaries.
+The store, WooCommerce MCP adapter and team gateway control plane/data plane are implemented. The gateway aggregates WooCommerce plus two sample MCP sources through one Streamable HTTP endpoint. It supports admin/member accounts, invitations, individually hashed/revocable API keys, member tool grants, server registry controls, health discovery and attributed audit logs. The live dashboard uses the gateway API.
 
-The Python WooCommerce MCP server is implemented with five tools and an internal-only Helm workload. The React dashboard is a local demo frontend. The gateway and live team/chat workflows are the next phases. The production values are a deployment configuration, not evidence of a live VPS deployment.
+The dashboard chat/LLM tool loop, complete reproducible two-user acceptance demo, and VPS deployment have not yet been verified. They are the next milestones. The architecture and threat model distinguish implemented controls from planned controls.
 
-## Start locally
+## Local setup
 
-Prerequisites: running Docker Desktop, k3d, kubectl, Helm and uv.
+Prerequisites: Docker Desktop, Helm, k3d, kubectl, Python 3.12 and `uv`.
 
 ```sh
-brew install helm k3d
 uv python install 3.12
 uv sync --locked
 ./scripts/local-up.sh
-export KUBECONFIG="$PWD/.local/kubeconfig"
-kubectl -n urumi get pods,pvc,ingress
+./scripts/deploy-gateway.sh
 ```
 
-- Store: **http://store.localhost:8080/**
-- WordPress admin: **http://store.localhost:8080/wp-admin/**
-- Admin credentials: ignored, private `.local/credentials.json`.
+The scripts use only `.local/kubeconfig`. `deploy-gateway.sh` builds/imports gateway, dashboard and demo upstream images, ensures the WooCommerce MCP service is deployed, and enables the chart workloads.
 
-The initialization Job installs pinned WooCommerce, creates a demo notebook, enables free shipping and cash on delivery, and can be rerun. Follow [deployment instructions](docs/deployment.md) to place a real demo order and inspect it in admin. This is a development store with dummy data and no real payments.
+- Store: [http://store.localhost:8080](http://store.localhost:8080)
+- Dashboard: [http://gateway.localhost:8080](http://gateway.localhost:8080)
+- MCP endpoint: `http://gateway.localhost:8080/mcp`
 
-```sh
-# Verify the storefront and visitor cart:
-uv run python scripts/verify-store.py
-# Explicitly create a real demo order through WooCommerce visitor checkout:
-uv run python scripts/verify-store.py --checkout
-```
+If `.localhost` does not resolve in your browser, add `127.0.0.1 store.localhost gateway.localhost` to your local hosts file. Local generated credentials are in ignored `.local/credentials.json`; read them privately and never commit or record that file. The bootstrap admin email is `admin@example.test`.
 
-No LLM key or external account is needed for this phase. Credentials are generated separately from Helm; never commit `.local`, `.env`, kubeconfigs or Secrets.
+For the local gateway demo, sign in as the bootstrap admin, invite a second user under **Team**, complete their one-time invite, and generate a separate MCP key from each account. In MCP Inspector, select Streamable HTTP, configure the gateway URL and set `Authorization: Bearer <user-key>`. Never use a real customer or payment credential in the demo store.
 
-## Design and decisions
+The **Servers** view shows WooCommerce, inventory and fulfillment status/catalogs, grants, and admin controls to register, refresh, enable, disable and remove upstreams. **Team** handles invitations and keys. **Activity** shows outcomes and call duration. Each call rechecks live user-key revocation, server enablement and grants, and audit intent is committed before any upstream tool dispatch.
 
-- [System design](docs/architecture.md): gateway flow, sessions, tool aggregation, permissions, audit, failure handling and scaling.
-- [Architecture decision record](docs/decisions/001-foundation.md): Python, database split, k3d/k3s, secrets and scope.
-- [Scope and demo checklist](docs/scope.md): required features and implementation sequence.
-- [Threat model](docs/threat-model.md): implemented boundaries, planned controls and current limitations.
-- [Local/VPS setup and rollback](docs/deployment.md): same chart with environment values; backup requirements.
-- [Foundation verification](docs/verification.md): evidence collected from the running cluster.
+See [gateway operations](services/gateway/README.md) for the MCP request path and endpoints. See [deployment instructions](docs/deployment.md) for checkout, Kubernetes resources, local domains and the production-like Helm values path.
 
-## Layout
+## Architecture and decisions
+
+- [System design and reference tradeoffs](docs/architecture.md)
+- [ADR 001: platform foundation](docs/decisions/001-foundation.md)
+- [ADR 002: WooCommerce MCP adapter](docs/decisions/002-woocommerce-mcp.md)
+- [ADR 003: team MCP gateway](docs/decisions/003-team-gateway.md)
+- [Scope and assessment checklist](docs/scope.md)
+- [Threat model](docs/threat-model.md)
+- [Local/VPS setup, upgrades and rollback](docs/deployment.md)
+- [Foundation verification evidence](docs/verification.md)
+- [WooCommerce MCP verification evidence](docs/verification-mcp.md)
+
+## Repository layout
 
 ```text
-apps/dashboard/             React dashboard boundary (implementation follows)
-services/gateway/           Python gateway/auth/audit/chat boundary
-services/woocommerce_mcp/    Own WooCommerce MCP server boundary
-charts/platform/            Helm chart, local/prod values and Kubernetes templates
-infra/local/                Dedicated k3d cluster configuration
-scripts/                    Secrets, deployment and visitor checkout verification
-docs/                       Design, decisions, scope, security and evidence
+apps/dashboard/             React + TypeScript dashboard
+services/gateway/           Python API, identity, MCP aggregation, policy and audit
+services/demo_mcp/          Read-only sample inventory and fulfillment servers
+services/woocommerce_mcp/    Own authenticated WooCommerce MCP adapter
+charts/platform/             Helm workloads, ingress, storage, Secrets and NetworkPolicies
+migrations/                  PostgreSQL Alembic migrations
+scripts/                     Local cluster, secret and service deployment helpers
+docs/                        Architecture, tradeoffs, scope and security notes
 ```
 
-## Planned end-to-end behavior
+## Checks
 
-An admin connects three upstream MCP servers once. Two users reach them through a single gateway endpoint or the dashboard chat. API keys are hashed and revocable; upstream credentials stay server-side. Every tool call follows the same authorization and audit path. Disabled servers disappear from discovery and a dead upstream does not prevent calls to healthy servers.
+```sh
+make check
+```
 
-External MCP client setup and dashboard chat instructions will be added when those services work. Optional multi-store provisioning starts only after the mandatory two-user flow passes.
+`make check` runs Ruff formatting/lint and Helm lint/rendering for local and production-like values. `make verify` checks the local store; `make checkout` creates a real dummy COD order. `./scripts/verify-network.sh` checks local network isolation. These runtime checks require the dedicated `.local/kubeconfig`; `make checkout` creates a store order.
 
-## WooCommerce MCP phase
-
-See [MCP service instructions](services/woocommerce_mcp/README.md) for deployment, credentials, tool contracts and verification. Deploy locally with `./scripts/deploy-mcp.sh`. The upstream is internal-only; the external gateway endpoint is not implemented yet.
-
-[MCP verification evidence](docs/verification-mcp.md) records the five real tool calls, product/order IDs, authentication, validation and isolation checks. Run `make mcp-test` for automated tests. `local-up.sh` retains enabled components in an existing release; use `deploy-mcp.sh` to build/import the MCP image and enable it initially.
+The gateway image applies Alembic migrations in an init container before application startup. PostgreSQL data and WordPress content/database data use persistent volumes. Helm rollback restores manifests, not database data/schema. The local cluster and production values describe a single-node demonstration deployment, not high availability.

@@ -6,3 +6,14 @@ store:
   url: http://store.localhost:8080
   ingress:
     className: traefik
+gateway:
+  dashboardHost: gateway.localhost
+  mcpAllowedHosts:
+    - gateway.localhost:*
+    - localhost:*
+    - 127.0.0.1:*
+  mcpAllowedOrigins:
+    - http://gateway.localhost:8080
+    - http://localhost:*
+    - http://127.0.0.1:*
+  sessionCookieSecure: false

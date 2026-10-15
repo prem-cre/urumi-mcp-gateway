@@ -1,0 +1,116 @@
+{{- if .Values.gateway.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-gateway
+  labels:
+    {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: gateway, instance: {{ .Release.Name }}}
+  template:
+    metadata:
+      labels: {app: gateway, instance: {{ .Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: database-migrations
+          image: {{ .Values.gateway.image | quote }}
+          imagePullPolicy: {{ .Values.gateway.imagePullPolicy }}
+          command: ["uv", "run", "--no-sync", "alembic", "upgrade", "head"]
+          env:
+            - name: GATEWAY_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.gatewayDatabase.existingSecret }}, key: password}}
+            - name: GATEWAY_DATABASE_URL
+              value: {{ printf "postgresql+asyncpg://gateway:$(GATEWAY_DB_PASSWORD)@%s-postgres:5432/gateway" .Release.Name | quote }}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+      containers:
+        - name: gateway
+          image: {{ .Values.gateway.image | quote }}
+          imagePullPolicy: {{ .Values.gateway.imagePullPolicy }}
+          ports: [{name: http, containerPort: 8000}]
+          env:
+            - name: GATEWAY_DB_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.gatewayDatabase.existingSecret }}, key: password}}
+            - name: GATEWAY_DATABASE_URL
+              value: {{ printf "postgresql+asyncpg://gateway:$(GATEWAY_DB_PASSWORD)@%s-postgres:5432/gateway" .Release.Name | quote }}
+            - name: GATEWAY_API_KEY_PEPPER
+              valueFrom: {secretKeyRef: {name: {{ .Values.gateway.existingSecret }}, key: api-key-pepper}}
+            - name: GATEWAY_SESSION_PEPPER
+              valueFrom: {secretKeyRef: {name: {{ .Values.gateway.existingSecret }}, key: session-pepper}}
+            - name: GATEWAY_UPSTREAM_ENCRYPTION_KEY
+              valueFrom: {secretKeyRef: {name: {{ .Values.gateway.existingSecret }}, key: upstream-encryption-key}}
+            - name: GATEWAY_BOOTSTRAP_ADMIN_EMAIL
+              value: {{ .Values.gateway.adminEmail | quote }}
+            - name: GATEWAY_BOOTSTRAP_ADMIN_NAME
+              value: {{ .Values.gateway.adminName | quote }}
+            - name: GATEWAY_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: {{ .Values.gateway.existingSecret }}, key: admin-password}}
+            - name: GATEWAY_BOOTSTRAP_DEMO_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ .Values.gateway.existingSecret }}, key: demo-upstream-token}}
+            - name: GATEWAY_STORE_URL
+              value: {{ .Values.store.url | quote }}
+            - name: GATEWAY_WOO_MCP_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ .Values.woocommerceMcp.existingSecret }}, key: gateway-token}}
+            - name: GATEWAY_WOO_MCP_URL
+              value: {{ printf "http://%s-woocommerce-mcp:8000/mcp" .Release.Name | quote }}
+            - name: GATEWAY_INVENTORY_MCP_URL
+              value: {{ printf "http://%s-inventory-mcp:8000/mcp" .Release.Name | quote }}
+            - name: GATEWAY_FULFILLMENT_MCP_URL
+              value: {{ printf "http://%s-fulfillment-mcp:8000/mcp" .Release.Name | quote }}
+            - name: GATEWAY_INTERNAL_HOSTS
+              value: {{ toJson (list (printf "%s-woocommerce-mcp" .Release.Name) (printf "%s-inventory-mcp" .Release.Name) (printf "%s-fulfillment-mcp" .Release.Name) (printf "%s-woocommerce-mcp.%s.svc.cluster.local" .Release.Name .Release.Namespace) (printf "%s-inventory-mcp.%s.svc.cluster.local" .Release.Name .Release.Namespace) (printf "%s-fulfillment-mcp.%s.svc.cluster.local" .Release.Name .Release.Namespace)) | quote }}
+            - name: GATEWAY_MCP_ALLOWED_HOSTS
+              value: {{ toJson (concat .Values.gateway.mcpAllowedHosts (list .Values.gateway.dashboardHost)) | quote }}
+            - name: GATEWAY_MCP_ALLOWED_ORIGINS
+              value: {{ toJson .Values.gateway.mcpAllowedOrigins | quote }}
+            - name: GATEWAY_SESSION_COOKIE_SECURE
+              value: {{ .Values.gateway.sessionCookieSecure | quote }}
+            - name: GATEWAY_API_RPM_LIMIT
+              value: {{ .Values.gateway.apiRpmLimit | quote }}
+            - name: GATEWAY_TOOL_TIMEOUT_SECONDS
+              value: {{ .Values.gateway.toolTimeoutSeconds | quote }}
+            - name: GATEWAY_DISCOVERY_TIMEOUT_SECONDS
+              value: {{ .Values.gateway.discoveryTimeoutSeconds | quote }}
+            - name: GATEWAY_PROBE_INTERVAL_SECONDS
+              value: {{ .Values.gateway.probeIntervalSeconds | quote }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+            timeoutSeconds: 3
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {sizeLimit: 32Mi}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-gateway
+  labels:
+    {{- include "urumi.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {app: gateway, instance: {{ .Release.Name }}}
+  ports: [{name: http, port: 8000, targetPort: http}]
+{{- end }}

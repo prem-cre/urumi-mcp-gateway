@@ -1,6 +1,6 @@
 # System design: Python team MCP gateway
 
-Status: architecture accepted for implementation, 12 October 2026. The store foundation is deployed in this phase. The WooCommerce MCP service is now implemented (ADR 002). The React dashboard has a demo frontend; gateway and chat backend remain planned.
+Status: gateway foundation and dashboard control plane implemented 15 October 2026 (ADR 003). The WooCommerce MCP service and store foundation are implemented. The chat agent, live two-user Kubernetes walkthrough and production-like VPS deployment remain later milestones; they are not claimed as verified by this code change.
 
 ## Scope and boundaries
 
@@ -16,9 +16,9 @@ flowchart LR
     Gateway --> WooMCP[Python WooCommerce MCP: internal Service]
     Gateway --> Inventory[Inventory MCP: internal Service]
     Gateway --> Fulfillment[Fulfillment MCP: internal Service]
-    Gateway --> Chat[Chat loop inside backend]
-    Chat -->|loopback MCP request, short-lived user delegation| Gateway
-    Chat --> Model[Configured LLM provider]
+    Gateway -. next phase .-> Chat[Chat loop inside backend]
+    Chat -. user identity delegation .-> Gateway
+    Chat -. secret-backed provider key .-> Model[Configured LLM provider]
     WooMCP -->|store REST credential| WP[WordPress + WooCommerce]
     Edge -->|store host| WP
     WP --> Maria[(MariaDB)]
@@ -30,11 +30,11 @@ Only the gateway connects to upstream MCP servers. The browser never knows upstr
 
 - Python 3.12, FastAPI/Starlette, official Python MCP SDK, HTTPX, Pydantic, SQLAlchemy async + asyncpg, Alembic.
 - React + TypeScript + Vite for the dashboard, served as a separate static workload. Dashboard API and MCP routes share the gateway host to simplify cookie and CORS rules.
-- One Python gateway workload initially, with separate modules for administration, authentication, policy, discovery, routing, audit and chat. Avoid premature microservices while preserving those code boundaries.
+- One Python gateway workload initially, with separate modules for administration, authentication, policy, discovery, routing and audit. Chat is a later module; avoid premature microservices while preserving those code boundaries.
 - Separate WooCommerce MCP workload; two additional small, real demo upstream services for inventory/fulfillment. Declare demo data clearly. Cross-server example: find today's orders in WooCommerce and match their SKUs against inventory/fulfillment data.
 - Helm owns the store, databases, application Services, Deployments, ingress and policies. Secrets are supplied separately; charts reference Secret names.
 
-`services/gateway/`, `services/woocommerce_mcp/`, and `apps/dashboard/` reserve the service boundaries. Locked Python dependencies live in `uv.lock`. Choose SDK features against that installed release, not code copied from a newer branch.
+`services/gateway/`, `services/demo_mcp/`, `services/woocommerce_mcp/`, and `apps/dashboard/` implement the service boundaries. Locked Python dependencies live in `uv.lock`. The gateway and dashboard are deployed by the same Helm chart as the store. Chat remains planned.
 
 ## Request path and identity
 
@@ -49,13 +49,13 @@ Rejected tool attempts (revoked known key, disabled server, denied tool or inval
 
 API keys use a random secret and public lookup ID, with a keyed one-way hash stored in PostgreSQL. Compare digests in constant time. The hashing key is a Kubernetes Secret; API keys are displayed once. Dashboard sessions use separate random, hashed session tokens in HttpOnly cookies, with CSRF protection on writes. Browser-supplied user IDs are never accepted as identity.
 
-Chat is hosted in the gateway backend but calls `/mcp` through an actual MCP client over loopback. The backend creates a short-lived delegation token containing the authenticated user ID and a chat-only audience. The `/mcp` boundary validates it and reconstructs the same Principal; it does not let a browser mint or use this token. Each chat tool call follows the same authorization and audit path as external clients. Raw user API keys need not be stored or recovered for chat.
+Planned chat will be hosted in the gateway backend and call `/mcp` through an MCP client. It must carry the authenticated user's identity into the same authorization and audit path as external clients. The chat implementation and model credential are not present yet; no browser will receive an LLM credential.
 
 ## MCP protocol and session decisions
 
 Use Streamable HTTP with the locked official Python SDK. Baseline tools-only functionality uses stateless downstream HTTP transport and JSON responses where supported. Declare and verify protocol negotiation against MCP Inspector and one target client before extending optional capabilities. Do not advertise sampling, elicitation, resources, prompts, subscriptions or resumability until implemented.
 
-Upstreams may be stateful even when our gateway is stateless. Each gateway replica owns bounded SDK client sessions keyed by server ID and registry revision, with the upstream session ID retained only in that replica. Serialize or pool sessions according to the SDK's concurrency behavior. Registry edits close the old session and discard old tool schemas. A lost upstream session can be reinitialized for discovery; never replay a write with an uncertain outcome.
+Upstreams may be stateful even when our gateway is stateless. Each gateway replica owns an SDK client session per server ID and registry revision, with the upstream session ID retained only in that replica. Calls and discovery are serialized per server; separate servers remain independent. Registry URL, credential, enablement or removal changes invalidate that connection. A failed session is discarded and can be reinitialized on a later discovery; never replay a write with an uncertain outcome.
 
 This is not a transparent byte proxy: the gateway terminates downstream MCP, acts as an independent upstream MCP client, applies policy, and rewrites tool identity.
 
@@ -63,20 +63,20 @@ This is not a transparent byte proxy: the gateway terminates downstream MCP, act
 
 Use a gateway-assigned immutable server alias, not an upstream's self-reported server name. Public tool names follow `alias__tool`, restricted to permitted characters and length. If normalization or truncation creates collisions, append a short stable hash and keep an explicit `(public name -> server UUID, original upstream name)` map. Never reconstruct routing by splitting names. Alias changes are intentionally unsupported initially; display names are editable.
 
-Discovery has per-server deadlines and bounded parallelism. Store validated input schemas, original tool names, tool descriptions, schema hashes, timestamps and errors in PostgreSQL. Bound tool count, schema complexity, description length and result size. Schema changes invalidate cached catalogs; optional tool approvals can later pin schema hashes.
+Discovery has per-server deadlines and runs concurrently across servers. Store validated input schemas, original tool names, tool descriptions, schema hashes and discovery timestamps in PostgreSQL. Bound tool count, schema size, description length and result size. A failed discovery preserves the last known catalog and records the reason. A member grant is cleared if its tool disappears or its discovered schema hash changes; an admin must explicitly grant the changed tool again.
 
-Status precedence: Disabled when the admin switch is off; Unreachable after the last discovery/connectivity check fails; Connected after a successful MCP handshake/discovery. Display last check, reason and last success. A cached catalog from an unreachable enabled server can remain discoverable, marked stale in the dashboard; its calls return an explicit unavailable error. The brief only requires disabled server tools to disappear. Document this distinction rather than hiding an outage behind an empty list.
+Status precedence: Disabled when the admin switch is off; Unreachable after the last discovery/connectivity check fails; Connected after a successful MCP handshake/discovery. The dashboard displays last check, error and last success. The cached catalog from an unreachable enabled server remains discoverable while the dashboard marks it unavailable; calls fail clearly. Disabled server tools are omitted from the gateway catalog.
 
-`tools/list` must not synchronously wait on every upstream. Background checks refresh the catalog. Edits and disables invalidate caches immediately. Every call rereads enablement and grants in PostgreSQL. For external clients that cache catalogs, demonstrate re-list/reconnect; do not claim every client's UI refreshes instantly without implemented notifications.
+`tools/list` reads PostgreSQL and does not contact upstreams. Startup and a periodic loop refresh catalogs. Upstream URL/credential, enablement and removal changes schedule session invalidation; a successful refresh replaces that server's catalog. Every call rereads enablement and grants in PostgreSQL. For external clients that cache catalogs, re-list/reconnect after a change; the gateway does not yet send catalog-change notifications.
 
 ## Failure handling and concurrency
 
-- Independent connect/read deadlines per upstream, plus a gateway deadline and bounded queue. Initial defaults: 5 seconds connect, 20 seconds tool call, 5 seconds discovery; make them configurable.
-- Per-upstream semaphore isolates a slow server; a separate global cap limits total in-flight work. Reserve enough capacity that one upstream cannot consume all gateway slots.
-- Circuit breaker after repeated failures, with capped backoff and half-open probes. Distinguish timeout, authentication, invalid schema, upstream error, disabled server and permission denial.
+- Connection and MCP operations have configurable timeouts (3 seconds maximum connect timeout, 20 seconds tool call, 5 seconds discovery by default). One async lock per server serializes its calls and discovery; a slow server does not hold another server's lock. There is not yet a separate global concurrency cap.
+- Periodic probes and status tracking provide basic health isolation. A circuit breaker, exponential probe backoff and half-open state are deferred; repeated failures currently continue at the configured probe interval.
+- Distinguish permission denial, invalid arguments, timeout, unreachable transport, protocol failure and upstream tool error in responses and audit records.
 - Do not automatically retry product creation or status changes. A timeout may mean a committed write whose response was lost. Audit as `unknown_outcome`, explain it to the caller, and reconcile through a read.
-- Metadata/read-only retries may use capped jitter when demonstrably safe; do not trust a malicious server's read-only annotation as permission to replay.
-- Gateway liveness checks its own process. Readiness checks PostgreSQL and migration compatibility; an upstream outage never fails gateway readiness.
+- No MCP tool call is automatically retried. A timeout/transport interruption after dispatch is recorded as `unknown_outcome`, with guidance to reconcile through a read.
+- Gateway liveness checks its process. Startup checks PostgreSQL schema availability; readiness checks PostgreSQL. An upstream outage never fails gateway readiness.
 - Audit reconciliation marks interrupted in-flight records unknown after a restart; it cannot manufacture exactly-once execution.
 
 ## Load balancing and scaling
@@ -85,24 +85,22 @@ Traefik terminates public HTTP/TLS and forwards to Kubernetes Services. Services
 
 Stateless downstream MCP avoids gateway-session affinity. If adding downstream stateful SSE sessions, explicitly choose affinity plus recovery or external session ownership; a cookie alone is not sufficient for CLI MCP clients. Upstream sessions remain local to gateway replicas and must be recreated on restart. Arbitrary stateful upstreams with multiple pods require session-aware upstream routing; a plain Service can send the next call to the wrong pod. Our own MCP services should use stateless transport.
 
-For two gateway replicas, share PostgreSQL registry/audits/keys, check revocation on every request, version catalog records and propagate invalidation (PostgreSQL NOTIFY plus revision checks). Leader-election/advisory lock can limit health-check duplication. Per-replica limits are not a global rate limit; add Redis or a database-backed limiter only when demonstrating scaling. Budget DB pool size across replicas and background workers.
+The current Helm deployment pins the gateway at one replica. Each call checks current database revocation and grants, so identity checks are shared-state safe, and downstream HTTP is stateless. Upstream connections are process-local and each replica would establish its own MCP session; this needs a stateful-upstream scale test before raising replicas. Rate limiting currently uses a per-process in-memory window and is not a global limit. A distributed limiter, duplicate-probe coordination and DB pool sizing are required before supported horizontal scaling.
 
 WordPress stays at one replica because of writable content and background-job semantics. Multiple replicas require RWX/object storage, coordinated cron, shared cache/session review and measured database capacity. Increasing replicas in Helm alone would not solve this. Database failover, replicated storage and backup recovery are separate production work.
 
-## Data model to implement
+## Current persistence model and planned chat data
 
 | Table | Key responsibilities |
 | --- | --- |
 | users | identity, password hash, role, active state |
-| memberships/invitations | scoped invitation token hash, expiration, role |
-| api_keys | user FK, public key ID, hash, created/revoked timestamps |
-| sessions | hashed cookie token, user FK, expiration |
-| upstream_servers | immutable alias, URL, enabled, encrypted credential, revision |
-| discovered_tools | server FK, original/public tool names, schema, hash, discovery time |
-| tool_grants | user/role grants enforced at discovery and call time |
-| upstream_health | check time, last success, reason, state |
-| audit_calls | principal, key/session, server/tool snapshot, start/end, outcome, trace ID |
-| chat_messages | user/conversation, messages and bounded tool traces |
+| `users` | identity, Argon2 password hash, admin/member role, active state |
+| `invitations` | one-time token digest, target email, expiration, accepted time, role |
+| `api_keys` / `web_sessions` | user FK, keyed digest, created/revoked/expiry state |
+| `upstream_servers` | immutable alias, URL, encrypted credential, revision, enabled and health state; member grants are an allowlist on the server row |
+| `discovered_tools` | server FK, original/public tool names, JSON schemas, schema hash, discovery time |
+| `tool_audits` | principal/key, server/tool snapshot, start/end, outcome and error category |
+| Planned chat table | user-owned conversation messages and bounded tool traces, added with the chat phase |
 
 Use foreign keys and transactions. Removed servers and users must not erase historical audits; keep snapshots or soft-delete records. Do not store raw credentials, API keys, customer addresses or full tool payloads in audit metadata.
 
@@ -110,11 +108,11 @@ Use foreign keys and transactions. Removed servers and users must not erase hist
 
 Encrypt dynamic upstream credentials in PostgreSQL using an application encryption key supplied via Kubernetes Secret. This permits dashboard registration without granting the gateway Kubernetes Secret CRUD rights. Bootstrap/store/LLM/encryption secrets remain Kubernetes Secrets. Document this distinction: encrypted upstream records are secret material too.
 
-Admin URL registration needs two destination classes: predefined cluster services that match an explicit service/namespace allowlist, and external HTTPS destinations. Block metadata, loopback, link-local, cluster control plane and private destinations outside that allowlist. Check all resolved addresses and redirects; prevent DNS rebinding at connection time, constrain egress, and never forward the incoming authorization header. Registered local MCP Services are allowed intentionally, not via a blanket private-IP exception.
+URL registration allows configured internal service hostnames and external HTTPS names. IP literals, local-only names, external HTTP, embedded URL credentials, non-public DNS answers and redirects are rejected. DNS is rechecked before each new upstream connection. Because DNS validation and the HTTP client's resolution are separate operations, the current code does not pin an address against a DNS-rebinding race; default-deny egress plus a public-IPv4 allow rule excluding private, loopback and link-local ranges is the network-layer backstop. NetworkPolicy/CNI enforcement must be verified on the target cluster. Never forward the incoming authorization header.
 
 Untrusted upstream descriptions and outputs are data. Permissions and allowed arguments are enforced outside the model. Label origin, limit output, prohibit cross-user session access, and add explicit user confirmation for sensitive chat writes. Model confirmation is not authorization. Suppress PII in ordinary order summaries; provide only the fields needed for the question.
 
-Default-deny NetworkPolicies apply to application pods. Explicitly permit DNS, ingress-to-WordPress, WordPress-to-MariaDB, gateway-to-PostgreSQL and gateway-to-MCP. Check CNI enforcement with a denied connection test. Disable service-account token mounting for components with no Kubernetes API need. Official WordPress/database entrypoints initially need root for initialization; do not claim all containers run as non-root. The bootstrap job runs as UID 33. Harden custom Python workloads as non-root when added.
+Default-deny NetworkPolicies apply to stack pods. Explicitly permit DNS, ingress-to-WordPress/dashboard/gateway, WordPress-to-MariaDB, gateway-to-PostgreSQL/MCP and gateway HTTPS egress. The chart disables service-account token mounting and applies non-root, read-only root filesystems and dropped capabilities to the dashboard and custom MCP/gateway containers. Official database/WordPress images use their own initialization entrypoints and are not claimed as wholly non-root. CNI enforcement still requires runtime verification.
 
 ## Research comparison
 

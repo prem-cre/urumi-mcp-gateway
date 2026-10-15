@@ -7,10 +7,14 @@ The MCP runtime does not need database access or Kubernetes API privileges.
 
 import base64
 import json
+import os
 import secrets
 import subprocess
+from pathlib import Path
 
-NAMESPACE = "urumi"
+ROOT = Path(__file__).resolve().parents[1]
+os.environ["KUBECONFIG"] = str(ROOT / ".local" / "kubeconfig")
+NAMESPACE = os.environ.get("URUMI_NAMESPACE", "urumi")
 NAME = "urumi-woocommerce-mcp"
 exists = subprocess.check_output(
     ["kubectl", "-n", NAMESPACE, "get", "secret", NAME, "--ignore-not-found", "-o", "name"],

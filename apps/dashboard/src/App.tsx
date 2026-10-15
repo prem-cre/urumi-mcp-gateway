@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   Activity,
@@ -12,9 +12,9 @@ import {
   ExternalLink,
   LayoutDashboard,
   MessageSquare,
+  Pencil,
   Plus,
   Search,
-  Send,
   Server,
   ShieldCheck,
   Sparkles,
@@ -24,110 +24,41 @@ import {
 } from "lucide-react";
 
 type Page = "Overview" | "Servers" | "Assistant" | "Team" | "Activity";
+type Tool = {
+  name: string;
+  public_name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  member_allowed: boolean;
+};
 type Connection = {
-  id: number;
+  id: string;
   name: string;
   alias: string;
   description: string;
   url: string;
+  auth_header?: string | null;
+  auth_prefix?: string;
+  has_credential?: boolean;
   enabled: boolean;
-  tools: string[];
+  status: "connected" | "unreachable" | "disabled";
+  last_check_at?: string;
+  last_success_at?: string;
+  last_error?: string | null;
+  tools: Tool[];
   color: string;
   symbol: string;
 };
 type Log = {
-  id: number;
+  id: string;
   user: string;
   action: string;
   server: string;
   time: string;
-  duration: string;
+  duration_ms: number | null;
   outcome: string;
+  error_category?: string | null;
 };
-const initialServers: Connection[] = [
-  {
-    id: 1,
-    name: "WooCommerce",
-    alias: "woocommerce",
-    description: "Your store, connected.",
-    url: "http://woocommerce-mcp:8000/mcp",
-    enabled: true,
-    tools: [
-      "list_products",
-      "create_product",
-      "list_orders",
-      "get_order",
-      "update_order_status",
-    ],
-    color: "plum",
-    symbol: "W",
-  },
-  {
-    id: 2,
-    name: "Inventory",
-    alias: "inventory",
-    description: "Stock levels at a glance.",
-    url: "http://inventory-mcp:8000/mcp",
-    enabled: true,
-    tools: ["check_stock", "list_inventory", "get_low_stock"],
-    color: "sand",
-    symbol: "I",
-  },
-  {
-    id: 3,
-    name: "Fulfillment",
-    alias: "fulfillment",
-    description: "From checkout to doorstep.",
-    url: "http://fulfillment-mcp:8000/mcp",
-    enabled: true,
-    tools: [
-      "get_shipment",
-      "list_shipments",
-      "get_delivery_estimate",
-      "list_carriers",
-    ],
-    color: "blue",
-    symbol: "F",
-  },
-];
-const initialLogs: Log[] = [
-  {
-    id: 1,
-    user: "Prem Kumar",
-    action: "list_orders",
-    server: "WooCommerce",
-    time: "2 minutes ago",
-    duration: "128 ms",
-    outcome: "Success",
-  },
-  {
-    id: 2,
-    user: "Alex Morgan",
-    action: "check_stock",
-    server: "Inventory",
-    time: "8 minutes ago",
-    duration: "86 ms",
-    outcome: "Success",
-  },
-  {
-    id: 3,
-    user: "Prem Kumar",
-    action: "create_product",
-    server: "WooCommerce",
-    time: "16 minutes ago",
-    duration: "312 ms",
-    outcome: "Success",
-  },
-  {
-    id: 4,
-    user: "Alex Morgan",
-    action: "get_shipment",
-    server: "Fulfillment",
-    time: "24 minutes ago",
-    duration: "94 ms",
-    outcome: "Success",
-  },
-];
 const nav: { name: Page; icon: typeof Server }[] = [
   { name: "Overview", icon: LayoutDashboard },
   { name: "Servers", icon: Server },
@@ -138,16 +69,17 @@ const nav: { name: Page; icon: typeof Server }[] = [
 const descriptions: Record<Page, string> = {
   Overview: "A little clarity for everything connected.",
   Servers: "One place for every connection your team needs.",
-  Assistant: "Ask a question. See the tools behind the answer.",
+  Assistant: "The chat tool loop follows after the live gateway core.",
   Team: "Good work happens together.",
   Activity: "Every action, with a little more context.",
 };
 
-function Badge({ enabled }: { enabled: boolean }) {
+function Badge({ status }: { status: Connection["status"] }) {
+  const label = status === "connected" ? "Connected" : status === "disabled" ? "Disabled" : "Unreachable";
   return (
-    <span className={`badge ${enabled ? "green" : "neutral"}`}>
+    <span className={`badge ${status === "connected" ? "green" : status === "unreachable" ? "warning" : "neutral"}`}>
       <i />
-      {enabled ? "Connected" : "Disabled"}
+      {label}
     </span>
   );
 }
@@ -163,138 +95,297 @@ function Avatar({ name }: { name: string }) {
   );
 }
 
+type WorkspaceUser = { id: string; email: string; name: string; role: "admin" | "member" };
+type Member = {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  active: boolean;
+  key_status: string;
+  active_keys: number;
+};
+type Overview = {
+  connected_servers: number;
+  enabled_servers: number;
+  servers: number;
+  tools: number;
+  calls_today: number;
+  members: number;
+  success_rate: number | null;
+  average_duration_ms: number | null;
+  store_url?: string;
+};
+
+async function apiRequest<T>(path: string, csrf: string, init: RequestInit = {}): Promise<T> {
+  const method = (init.method || "GET").toUpperCase();
+  const headers = new Headers(init.headers);
+  if (init.body) headers.set("Content-Type", "application/json");
+  if (!(["GET", "HEAD", "OPTIONS"].includes(method)) && csrf) {
+    headers.set("X-CSRF-Token", csrf);
+  }
+  const response = await fetch(`/api${path}`, {
+    ...init,
+    method,
+    headers,
+    credentials: "include",
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || data.message || `Request failed (${response.status})`);
+  }
+  return data as T;
+}
+
+function connectionStyle(alias: string) {
+  const styles = ["plum", "sand", "blue"];
+  return { color: styles[[...alias].reduce((sum, char) => sum + char.charCodeAt(0), 0) % styles.length], symbol: alias[0]?.toUpperCase() || "M" };
+}
+
 export default function App() {
   const [page, setPage] = useState<Page>("Overview");
-  const [servers, setServers] = useState(initialServers);
-  const [logs, setLogs] = useState(initialLogs);
+  const [servers, setServers] = useState<Connection[]>([]);
+  const [logs, setLogs] = useState<Log[]>([]);
+  const [user, setUser] = useState<WorkspaceUser | null>(null);
+  const [csrf, setCsrf] = useState("");
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [personalKeys, setPersonalKeys] = useState<{ id: string; label: string; status: string; created_at: string }[]>([]);
   const [filter, setFilter] = useState("");
   const [notice, setNotice] = useState("");
   const [copied, setCopied] = useState(false);
-  const [members, setMembers] = useState([
-    {
-      name: "Prem Kumar",
-      email: "prem@example.test",
-      role: "Admin",
-      key: "Active",
-    },
-    {
-      name: "Alex Morgan",
-      email: "alex@example.test",
-      role: "Member",
-      key: "Active",
-    },
-  ]);
-  const [messages, setMessages] = useState<
-    { role: string; text: string; tool?: string }[]
-  >([]);
-  const [question, setQuestion] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [loginError, setLoginError] = useState("");
+  const [loginChecked, setLoginChecked] = useState(false);
+  const [inviteAcceptance, setInviteAcceptance] = useState(() => new URLSearchParams(window.location.search).get("invite") || "");
+  const [issuedKey, setIssuedKey] = useState("");
+  const [inviteToken, setInviteToken] = useState("");
   const [modal, setModal] = useState<"server" | "member">("server");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingServer, setEditingServer] = useState<Connection | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
-  const connected = servers.filter((s) => s.enabled);
+  const connected = servers.filter((s) => s.enabled && s.status === "connected");
   const visibleServers = servers.filter((s) =>
     `${s.name} ${s.description}`.toLowerCase().includes(filter.toLowerCase()),
   );
-  const toolCount = connected.reduce((n, s) => n + s.tools.length, 0);
+  const toolCount = servers.filter((s) => s.enabled).reduce((n, s) => n + s.tools.length, 0);
+
+  useEffect(() => {
+    const incomingToken = new URLSearchParams(window.location.search).get("invite");
+    if (incomingToken) sessionStorage.setItem("urumi_pending_invite", incomingToken);
+    const pendingToken = inviteAcceptance || sessionStorage.getItem("urumi_pending_invite") || "";
+    if (pendingToken) sessionStorage.setItem("urumi_pending_invite", pendingToken);
+    else sessionStorage.removeItem("urumi_pending_invite");
+    if (incomingToken) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("invite");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+  }, [inviteAcceptance]);
+
+  async function refreshWorkspace(activeUser = user, activeCsrf = csrf) {
+    if (!activeUser) return;
+    const [rawServers, rawOverview, rawLogs] = await Promise.all([
+      apiRequest<any[]>("/servers", activeCsrf),
+      apiRequest<Overview>("/overview", activeCsrf),
+      apiRequest<any[]>("/audit?limit=100", activeCsrf),
+    ]);
+    setServers(rawServers.map((server) => ({ ...server, ...connectionStyle(server.alias) })));
+    setOverview(rawOverview);
+    setLogs(rawLogs.map((row) => ({
+      ...row,
+      time: new Date(row.time).toLocaleString(),
+      outcome: row.outcome.replaceAll("_", " "),
+    })));
+    const ownKeys = await apiRequest<any[]>("/keys", activeCsrf);
+    setPersonalKeys(ownKeys);
+    if (activeUser.role === "admin") {
+      setMembers(await apiRequest<Member[]>("/members", activeCsrf));
+    } else {
+      setMembers([{ id: activeUser.id, name: activeUser.name, email: activeUser.email, role: activeUser.role, active: true, key_status: ownKeys.some((key) => key.status === "Active") ? "Active" : "No active key", active_keys: ownKeys.filter((key) => key.status === "Active").length }]);
+    }
+  }
+
+  async function refreshLiveStatus(activeCsrf = csrf) {
+    const [rawServers, rawOverview, rawLogs] = await Promise.all([
+      apiRequest<any[]>("/servers", activeCsrf),
+      apiRequest<Overview>("/overview", activeCsrf),
+      apiRequest<any[]>("/audit?limit=100", activeCsrf),
+    ]);
+    setServers(rawServers.map((server) => ({ ...server, ...connectionStyle(server.alias) })));
+    setOverview(rawOverview);
+    setLogs(rawLogs.map((row) => ({
+      ...row,
+      time: new Date(row.time).toLocaleString(),
+      outcome: row.outcome.replaceAll("_", " "),
+    })));
+  }
+
+  useEffect(() => {
+    let active = true;
+    apiRequest<{ user: WorkspaceUser; csrf_token: string }>("/auth/me", "")
+      .then(async (session) => {
+        if (!active) return;
+        setUser(session.user);
+        setCsrf(session.csrf_token);
+        await refreshWorkspace(session.user, session.csrf_token);
+      })
+      .catch(() => {
+        if (active) setUser(null);
+      })
+      .finally(() => active && setLoginChecked(true));
+    return () => { active = false; };
+    // Initial session bootstrap only; subsequent refreshes are user-triggered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const timer = window.setInterval(() => {
+      void refreshLiveStatus(csrf).catch(() => undefined);
+    }, 10_000);
+    return () => window.clearInterval(timer);
+  }, [user?.id, csrf]);
+
+  useEffect(() => {
+    const element = dialog.current;
+    if (!element) return;
+    if (modalOpen && !element.open) element.showModal();
+    if (!modalOpen && element.open) element.close();
+  }, [modalOpen, modal, editingServer]);
+
   function navigate(next: Page) {
     setPage(next);
     setFilter("");
     setNotice("");
   }
-  function openModal(kind: "server" | "member") {
+  function openModal(kind: "server" | "member", server: Connection | null = null) {
     setModal(kind);
-    dialog.current?.showModal();
+    setEditingServer(server);
+    setModalOpen(true);
   }
-  function toggle(id: number) {
-    const target = servers.find((s) => s.id === id)!;
-    setServers((current) =>
-      current.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s)),
-    );
-    setNotice(
-      `${target.name} ${target.enabled ? "disabled" : "enabled"} in this preview.`,
-    );
-    setLogs((current) => [
-      {
-        id: Date.now(),
-        user: "Prem Kumar",
-        action: target.enabled ? "disable_server" : "enable_server",
-        server: target.name,
-        time: "Just now",
-        duration: "—",
-        outcome: "Demo",
-      },
-      ...current,
-    ]);
+  async function toggle(id: string) {
+    const target = servers.find((s) => s.id === id);
+    if (!target) return;
+    try {
+      await apiRequest(`/servers/${id}`, csrf, { method: "PATCH", body: JSON.stringify({ enabled: !target.enabled }) });
+      await refreshWorkspace();
+      setNotice(`${target.name} ${target.enabled ? "disabled" : "enabled"}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not update the server.");
+    }
   }
   async function copyEndpoint() {
     try {
-      await navigator.clipboard.writeText("https://gateway.example.com/mcp");
+      await navigator.clipboard.writeText(`${window.location.origin}/mcp`);
       setCopied(true);
-      setNotice(
-        "Example endpoint copied. A live gateway is not connected yet.",
-      );
+      setNotice("Gateway MCP endpoint copied.");
     } catch {
-      setNotice(
-        "Clipboard unavailable. Example endpoint: https://gateway.example.com/mcp",
-      );
+      setNotice(`Copy this endpoint: ${window.location.origin}/mcp`);
     }
   }
-  function submitModal(event: FormEvent<HTMLFormElement>) {
+  async function submitModal(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = new FormData(form);
     const name = String(data.get("name")).trim();
     if (!name) return;
-    if (modal === "server") {
-      const url = String(data.get("url")).trim();
-      const alias = name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
-      setServers((current) => [
-        ...current,
-        {
-          id: Date.now(),
-          name,
-          alias,
-          description: "New demo connection.",
-          url,
-          enabled: false,
-          tools: [],
-          color: "blue",
-          symbol: name[0].toUpperCase(),
-        },
-      ]);
-      setNotice(
-        `${name} added to the preview. No connection has been attempted.`,
-      );
-    } else {
-      setMembers((current) => [
-        ...current,
-        {
-          name,
-          email: String(data.get("email")).trim(),
-          role: "Member",
-          key: "Invited",
-        },
-      ]);
-      setNotice("Demo invitation added. No email has been sent.");
+    setBusy(true);
+    try {
+      if (modal === "server") {
+        const alias = String(data.get("alias") || name).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+        const body = {
+          alias: /^[a-z]/.test(alias) ? alias : `mcp_${alias}`.slice(0, 48),
+          display_name: name,
+          description: String(data.get("description") || ""),
+          url: String(data.get("url")).trim(),
+          auth_header: String(data.get("auth_header") || "Authorization"),
+          auth_prefix: String(data.get("auth_prefix") ?? ""),
+          static_credential: String(data.get("credential") || "") || null,
+        };
+        if (editingServer) {
+          const patch: Record<string, unknown> = {
+            display_name: name,
+            description: body.description,
+            url: body.url,
+            auth_prefix: body.auth_prefix,
+          };
+          if (String(data.get("auth_header") || "")) patch.auth_header = body.auth_header;
+          if (body.static_credential) patch.static_credential = body.static_credential;
+          await apiRequest(`/servers/${editingServer.id}`, csrf, { method: "PATCH", body: JSON.stringify(patch) });
+        } else {
+          await apiRequest("/servers", csrf, { method: "POST", body: JSON.stringify(body) });
+        }
+        await refreshWorkspace();
+        setNotice(editingServer ? `${name} connection updated.` : `${name} registered. Review its discovered tools and enable it when ready.`);
+      } else {
+        const invitation = await apiRequest<{ invite_token: string; email: string }>("/members/invitations", csrf, {
+          method: "POST",
+          body: JSON.stringify({ display_name: name, email: String(data.get("email")).trim(), role: "member" }),
+        });
+        setInviteToken(invitation.invite_token);
+        setNotice(`Invitation created for ${invitation.email}. Copy the one-time token below and share it securely.`);
+      }
+      form.reset();
+      setEditingServer(null);
+      setModalOpen(false);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not complete this action.");
+    } finally {
+      setBusy(false);
     }
-    event.currentTarget.reset();
-    dialog.current?.close();
   }
-  function ask(text: string) {
-    if (!text.trim()) return;
-    const woo = servers.find((s) => s.alias === "woocommerce" && s.enabled);
-    const isOrdersQuestion = /orders?|today/i.test(text);
-    const tool =
-      woo && isOrdersQuestion ? "woocommerce__list_orders" : undefined;
-    const answer = !isOrdersQuestion
-      ? "This is a scripted frontend preview. Try “What orders came in today?” to see a sample response and tool trace."
-      : woo
-        ? "Preview response: 1 sample order today — #12, Urumi Demo Notebook, ₹299.00, processing. When the backend is connected, answers will come from your store through the gateway."
-        : "WooCommerce is disabled in this preview. Enable it in Servers to restore its tools.";
-    setMessages((current) => [
-      ...current,
-      { role: "user", text },
-      { role: "assistant", text: answer, tool },
-    ]);
-    setQuestion("");
+
+  async function login(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    setBusy(true);
+    setLoginError("");
+    try {
+      const session = await apiRequest<{ user: WorkspaceUser; csrf_token: string }>("/auth/login", "", {
+        method: "POST",
+        body: JSON.stringify({ email: String(data.get("email")), password: String(data.get("password")) }),
+      });
+      setUser(session.user);
+      setCsrf(session.csrf_token);
+      await refreshWorkspace(session.user, session.csrf_token);
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "Sign in failed.");
+    } finally {
+      setBusy(false);
+      setLoginChecked(true);
+    }
+  }
+
+  async function acceptInvitation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    setBusy(true);
+    setLoginError("");
+    try {
+      await apiRequest("/invitations/accept", "", {
+        method: "POST",
+        body: JSON.stringify({ token: inviteAcceptance, email: String(data.get("email")), password: String(data.get("password")) }),
+      });
+      const email = String(data.get("email"));
+      setInviteAcceptance("");
+      sessionStorage.removeItem("urumi_pending_invite");
+      window.history.replaceState({}, "", window.location.pathname);
+      setLoginError(`Account created for ${email}. Sign in with your new password.`);
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : "Invitation could not be accepted.");
+    } finally {
+      setBusy(false);
+      setLoginChecked(true);
+    }
+  }
+
+  async function logout() {
+    try { await apiRequest("/auth/logout", csrf, { method: "POST" }); } catch { /* cookie may already have expired */ }
+    setUser(null);
+    setServers([]);
+    setLogs([]);
+    setOverview(null);
   }
   const activityRows = logs.filter((l) =>
     `${l.action} ${l.user} ${l.server}`
@@ -328,12 +419,12 @@ export default function App() {
                   </span>
                 </td>
                 <td className="muted">{log.time}</td>
-                <td className="muted mono">{log.duration}</td>
+                <td className="muted mono">{log.duration_ms === null ? "—" : `${log.duration_ms} ms`}</td>
                 <td>
                   <span
-                    className={`badge ${log.outcome === "Success" ? "green" : "neutral"}`}
+                    className={`badge ${log.outcome === "success" ? "green" : log.outcome === "in progress" ? "neutral" : "warning"}`}
                   >
-                    {log.outcome === "Success" ? <Check size={12} /> : null}
+                    {log.outcome === "success" ? <Check size={12} /> : null}
                     {log.outcome}
                   </span>
                 </td>
@@ -344,6 +435,35 @@ export default function App() {
         {activityRows.length === 0 ? (
           <p className="empty-small">No activity matches your search.</p>
         ) : null}
+      </div>
+    );
+  }
+  if (!loginChecked) {
+    return <div className="login-shell"><div className="login-card"><span className="brand-mark">u<span>·</span></span><h1>Connecting to your gateway</h1><p>Checking your secure workspace session…</p></div></div>;
+  }
+  if (!user) {
+    return (
+      <div className="login-shell">
+        {inviteAcceptance ? <form className="login-card" onSubmit={acceptInvitation}>
+          <span className="brand-mark">u<span>·</span></span>
+          <div className="eyebrow">TEAM INVITATION</div>
+          <h1>Set up your account.</h1>
+          <p>Choose a password to join the Urumi workspace.</p>
+          <label>Email<input name="email" type="email" required autoComplete="username" /></label>
+          <label>Password<input name="password" type="password" required minLength={12} autoComplete="new-password" /></label>
+          {loginError ? <p className="login-error" role="alert">{loginError}</p> : null}
+          <button className="primary full" disabled={busy}>{busy ? "Creating account…" : "Accept invitation"}<ArrowRight size={15} /></button>
+        </form> : <form className="login-card" onSubmit={login}>
+          <span className="brand-mark">u<span>·</span></span>
+          <div className="eyebrow">URUMI TEAM GATEWAY</div>
+          <h1>Welcome back.</h1>
+          <p>Sign in to manage your team’s MCP connections.</p>
+          <label>Email<input name="email" type="email" required autoComplete="username" placeholder="admin@example.test" /></label>
+          <label>Password<input name="password" type="password" required autoComplete="current-password" /></label>
+          {loginError ? <p className="login-error" role="alert">{loginError}</p> : null}
+          <button className="primary full" disabled={busy}>{busy ? "Signing in…" : "Sign in"}<ArrowRight size={15} /></button>
+          <small className="muted">Use the bootstrap admin credentials from your local secret file.</small>
+        </form>}
       </div>
     );
   }
@@ -365,10 +485,10 @@ export default function App() {
           urumi<span className="brand-dot">.</span>
         </a>
         <div className="workspace">
-          <span className="workspace-icon">P</span>
+          <span className="workspace-icon">{user.name[0]?.toUpperCase()}</span>
           <div>
-            <strong>Prem’s workspace</strong>
-            <small>Team gateway</small>
+            <strong>{user.name}’s workspace</strong>
+            <small>{user.role === "admin" ? "Workspace admin" : "Team member"}</small>
           </div>
           <ChevronDown size={14} />
         </div>
@@ -396,11 +516,12 @@ export default function App() {
             <p>A shared way to work with your tools.</p>
           </div>
           <div className="profile">
-            <Avatar name="Prem Kumar" />
+            <Avatar name={user.name} />
             <div>
-              <strong>Prem Kumar</strong>
-              <small>Workspace admin</small>
+              <strong>{user.name}</strong>
+              <small>{user.email}</small>
             </div>
+            <button className="icon-button signout" onClick={logout} aria-label="Sign out"><ExternalLink size={15} /></button>
           </div>
         </div>
       </aside>
@@ -411,9 +532,9 @@ export default function App() {
             <span>{page}</span>
           </div>
           <div className="topbar-right">
-            <span className="preview-pill">Interactive preview</span>
+            <span className="preview-pill">Live gateway</span>
             <a
-              href="http://store.localhost:8080"
+              href={overview?.store_url || "http://store.localhost:8080"}
               target="_blank"
               rel="noreferrer"
             >
@@ -426,16 +547,16 @@ export default function App() {
             <div>
               <div className="eyebrow">YOUR TEAM, CONNECTED</div>
               <h1>
-                {page === "Overview" ? "Welcome back, Prem" : page}
+                {page === "Overview" ? `Welcome back, ${user.name.split(" ")[0]}` : page}
                 <span className="heading-dot">.</span>
               </h1>
               <p>{descriptions[page]}</p>
             </div>
-            {page === "Overview" || page === "Servers" ? (
+            {user.role === "admin" && (page === "Overview" || page === "Servers") ? (
               <button className="primary" onClick={() => openModal("server")}>
                 <Plus size={16} /> Connect a server
               </button>
-            ) : page === "Team" ? (
+            ) : user.role === "admin" && page === "Team" ? (
               <button className="primary" onClick={() => openModal("member")}>
                 <Plus size={16} /> Invite member
               </button>
@@ -443,8 +564,7 @@ export default function App() {
           </div>
           <div className="demo-note">
             <span className="demo-dot" />
-            Demo workspace · Sample data and local interactions. Live gateway
-            integration comes next.
+            Live workspace · Registry, access controls and activity come from PostgreSQL.
           </div>
           {notice ? (
             <div className="notice" role="status">
@@ -468,18 +588,15 @@ export default function App() {
                     </span>
                   </div>
                   <strong>
-                    {connected.length}
-                    <span className="stat-denominator">
-                      {" "}
-                      / {servers.length}
-                    </span>
+                    {overview?.connected_servers ?? connected.length}
+                    <span className="stat-denominator"> / {overview?.servers ?? servers.length}</span>
                   </strong>
                   <div className="stat-bottom">
-                    <span className="green-text">
+                    <span className={servers.some((s) => s.status === "unreachable" && s.enabled) ? "warning-text" : "green-text"}>
                       <i />
-                      {connected.length === servers.length
+                      {overview?.connected_servers === overview?.servers && overview?.servers
                         ? "All connections healthy"
-                        : "Some servers disabled"}
+                        : `${overview?.enabled_servers ?? connected.length} enabled · ${servers.filter((s) => s.status === "unreachable" && s.enabled).length} unreachable`}
                     </span>
                   </div>
                 </div>
@@ -490,7 +607,7 @@ export default function App() {
                       <Zap size={18} />
                     </span>
                   </div>
-                  <strong>{toolCount}</strong>
+                  <strong>{overview?.tools ?? toolCount}</strong>
                   <div className="stat-bottom">Across your enabled servers</div>
                 </div>
                 <div className="stat">
@@ -500,23 +617,8 @@ export default function App() {
                       <Activity size={18} />
                     </span>
                   </div>
-                  <strong>
-                    148
-                    <svg
-                      className="sparkline"
-                      viewBox="0 0 120 34"
-                      aria-hidden="true"
-                    >
-                      <path d="M0 29 L10 23 L20 26 L30 17 L40 22 L50 13 L60 18 L70 8 L80 12 L90 5 L100 10 L120 2" />
-                    </svg>
-                  </strong>
-                  <div className="stat-bottom">
-                    <span className="green-text">
-                      <ArrowUpRight size={13} />
-                      18%
-                    </span>
-                    <span>vs. yesterday · sample</span>
-                  </div>
+                  <strong>{overview?.calls_today ?? 0}</strong>
+                  <div className="stat-bottom">Audited MCP requests today</div>
                 </div>
                 <div className="stat">
                   <div className="stat-top">
@@ -525,11 +627,10 @@ export default function App() {
                       <Users size={18} />
                     </span>
                   </div>
-                  <strong>{members.length}</strong>
+                  <strong>{overview?.members ?? members.length}</strong>
                   <div className="stat-bottom">
-                    <span className="mini-avatar">PK</span>
-                    <span className="mini-avatar lavender">AM</span>
-                    <span>Your people, one endpoint</span>
+                    {members.slice(0, 2).map((member) => <span key={member.id} className="mini-avatar">{member.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</span>)}
+                    <span>Individual keys, one endpoint</span>
                   </div>
                 </div>
               </div>
@@ -562,7 +663,7 @@ export default function App() {
                           {server.tools.length} tools · Streamable HTTP
                         </small>
                       </div>
-                      <Badge enabled={server.enabled} />
+                      <Badge status={server.status} />
                       <ChevronRight className="row-arrow" size={15} />
                     </button>
                   ))}
@@ -574,24 +675,14 @@ export default function App() {
                   <span className="eyebrow">A LITTLE HELP GOES A LONG WAY</span>
                   <h2>Talk to your workspace.</h2>
                   <p>
-                    Ask about orders, check inventory, or find what needs your
-                    attention.
+                    Ask your workspace after the chat agent loop is connected. The MCP endpoint and policy layer are live.
                   </p>
-                  <button
-                    className="prompt-example"
-                    onClick={() => {
-                      navigate("Assistant");
-                      ask("What orders came in today?");
-                    }}
-                  >
+                  <button className="prompt-example" onClick={() => navigate("Assistant")}>
                     <MessageSquare size={16} />
-                    “What orders came in today?”
+                    View the assistant milestone
                     <ArrowUpRight size={16} />
                   </button>
-                  <button
-                    className="text-button"
-                    onClick={() => navigate("Assistant")}
-                  >
+                    <button className="text-button" onClick={() => navigate("Assistant")}>
                     Open assistant <ArrowRight size={15} />
                   </button>
                 </section>
@@ -621,10 +712,10 @@ export default function App() {
                     Connect your preferred MCP client to your team’s gateway.
                   </p>
                 </div>
-                <code>gateway.example.com/mcp</code>
+                <code>{window.location.host}/mcp</code>
                 <button className="secondary" onClick={copyEndpoint}>
                   {copied ? <Check size={15} /> : <Clipboard size={15} />}
-                  {copied ? "Copied example" : "Copy example URL"}
+                  {copied ? "Copied" : "Copy MCP URL"}
                 </button>
               </section>
             </>
@@ -652,11 +743,13 @@ export default function App() {
                       <span className={`server-icon ${s.color}`}>
                         {s.symbol}
                       </span>
-                      <Badge enabled={s.enabled} />
+                      <Badge status={s.status} />
                     </div>
                     <h2>{s.name}</h2>
                     <p>{s.description}</p>
                     <code className="server-url">{s.url}</code>
+                    {s.last_check_at ? <p className="server-check">Checked {new Date(s.last_check_at).toLocaleTimeString()}</p> : null}
+                    {s.last_error ? <p className="server-error">Last check: {s.last_error.replaceAll("_", " ")}</p> : null}
                     <details>
                       <summary>
                         {s.tools.length} tools <ChevronDown size={14} />
@@ -664,24 +757,63 @@ export default function App() {
                       <div className="tool-list">
                         {s.tools.length ? (
                           s.tools.map((tool) => (
-                            <code key={tool}>
-                              {s.alias}__{tool}
-                            </code>
+                            <div className="tool-permission" key={tool.public_name}>
+                              <code title={tool.description}>{tool.public_name}</code>
+                              {user.role === "admin" ? (
+                                <label className="permission-toggle">
+                                  <input
+                                    type="checkbox"
+                                    checked={tool.member_allowed}
+                                    aria-label={`Allow members to call ${tool.public_name}`}
+                                    onChange={async () => {
+                                      const next = s.tools.filter((item) => item.member_allowed !== (item.public_name === tool.public_name)).map((item) => item.name);
+                                      try {
+                                        await apiRequest(`/servers/${s.id}`, csrf, { method: "PATCH", body: JSON.stringify({ member_tools: next }) });
+                                        await refreshWorkspace();
+                                      } catch (error) {
+                                        setNotice(error instanceof Error ? error.message : "Could not update permissions.");
+                                      }
+                                    }}
+                                  />
+                                  <span>Member</span>
+                                </label>
+                              ) : null}
+                            </div>
                           ))
                         ) : (
                           <span>
-                            Tools will be discovered when the backend is
-                            connected.
+                            Tools appear after a successful upstream discovery.
                           </span>
                         )}
                       </div>
                     </details>
-                    <button
-                      className="secondary full"
-                      onClick={() => toggle(s.id)}
-                    >
-                      {s.enabled ? "Disable in preview" : "Enable in preview"}
-                    </button>
+                    <div className="server-actions">
+                      {user.role === "admin" ? (
+                        <>
+                          <button className="secondary" onClick={() => toggle(s.id)}>
+                            {s.enabled ? "Disable" : "Enable"}
+                          </button>
+                          <button className="secondary" onClick={() => openModal("server", s)}>
+                            <Pencil size={14} /> Edit
+                          </button>
+                          <button className="secondary" onClick={async () => {
+                            try {
+                              const refreshed = await apiRequest<any>(`/servers/${s.id}/refresh`, csrf, { method: "POST" });
+                              await refreshWorkspace();
+                              setNotice(refreshed.refresh_ok ? `${s.name} catalog refreshed.` : `${s.name} is unreachable: ${refreshed.refresh_error}`);
+                            } catch (error) { setNotice(error instanceof Error ? error.message : "Refresh failed."); }
+                          }}>Refresh</button>
+                          <button className="text-button danger" onClick={async () => {
+                            if (!window.confirm(`Remove ${s.name} from the gateway?`)) return;
+                            try {
+                              await apiRequest(`/servers/${s.id}`, csrf, { method: "DELETE" });
+                              await refreshWorkspace();
+                              setNotice(`${s.name} removed from the gateway.`);
+                            } catch (error) { setNotice(error instanceof Error ? error.message : "Remove failed."); }
+                          }}>Remove</button>
+                        </>
+                      ) : <span className="muted">Managed by your admin</span>}
+                    </div>
                   </section>
                 ))}
               </div>
@@ -691,69 +823,18 @@ export default function App() {
             </>
           ) : null}
           {page === "Assistant" ? (
-            <section className="panel chat-panel">
-              <div className="chat-messages" aria-live="polite">
-                {messages.length === 0 ? (
-                  <div className="chat-empty">
-                    <span className="assistant-bloom">
-                      <Sparkles size={30} />
-                    </span>
-                    <h2>What’s on your mind?</h2>
-                    <p>
-                      Explore a preview of your workspace assistant.
-                      <br />
-                      Responses are scripted; no model or tools are called.
-                    </p>
-                    <button
-                      className="secondary"
-                      onClick={() => ask("What orders came in today?")}
-                    >
-                      Try the sample orders question <ArrowUpRight size={14} />
-                    </button>
-                  </div>
-                ) : (
-                  messages.map((m, i) => (
-                    <div className={`chat-message ${m.role}`} key={i}>
-                      <span className="message-label">
-                        {m.role === "user"
-                          ? "You"
-                          : "Urumi assistant · preview"}
-                      </span>
-                      <p>{m.text}</p>
-                      {m.tool ? (
-                        <span className="tool-trace">
-                          <Zap size={13} />
-                          Example tool: {m.tool}
-                        </span>
-                      ) : null}
-                    </div>
-                  ))
-                )}
+            <section className="panel milestone-panel">
+              <span className="assistant-bloom"><Sparkles size={30} /></span>
+              <div>
+                <div className="eyebrow">NEXT MILESTONE</div>
+                <h2>Chat agent through the same gateway</h2>
+                <p>The MCP endpoint is live. The next phase will add the model tool loop here, using your signed-in identity so its calls follow the same permissions and audit path.</p>
+                <div className="milestone-details">
+                  <span><Check size={14} /> Shared catalog and routing</span>
+                  <span><Check size={14} /> Per-user keys and revocation</span>
+                  <span><Activity size={14} /> Audited upstream calls</span>
+                </div>
               </div>
-              <form
-                className="chat-input"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  ask(question);
-                }}
-              >
-                <input
-                  aria-label="Message the preview assistant"
-                  placeholder="Ask about your workspace…"
-                  value={question}
-                  onChange={(e) => setQuestion(e.target.value)}
-                />
-                <button
-                  className="primary"
-                  disabled={!question.trim()}
-                  aria-label="Send message"
-                >
-                  <Send size={18} />
-                </button>
-              </form>
-              <p className="chat-disclaimer">
-                Preview only · No live store changes or tool calls
-              </p>
             </section>
           ) : null}
           {page === "Team" ? (
@@ -761,9 +842,30 @@ export default function App() {
               <div className="panel-heading">
                 <div>
                   <h2>Your team</h2>
-                  <p>Shared connections. Individual access.</p>
+                  <p>Shared tools. Individual, revocable gateway keys.</p>
                 </div>
                 <span className="badge neutral">{members.length} members</span>
+              </div>
+              <section className="key-panel">
+                <div>
+                  <strong>Your MCP API key</strong>
+                  <p>Use this key with the gateway URL. It is shown only once when created.</p>
+                </div>
+                <button className="secondary" disabled={busy} onClick={async () => {
+                  setBusy(true);
+                  try {
+                    const result = await apiRequest<{ key: string }>("/keys", csrf, { method: "POST", body: JSON.stringify({ label: "Personal MCP client" }) });
+                    setIssuedKey(result.key);
+                    await refreshWorkspace();
+                    setNotice("Your new API key is ready. Copy it now; it cannot be displayed again.");
+                  } catch (error) { setNotice(error instanceof Error ? error.message : "Could not create a key."); }
+                  finally { setBusy(false); }
+                }}><Plus size={15} /> Generate key</button>
+              </section>
+              {issuedKey ? <div className="secret-reveal"><span><strong>Copy your key now</strong><code>{issuedKey}</code></span><button className="secondary" onClick={async () => { await navigator.clipboard.writeText(issuedKey); setIssuedKey(""); setNotice("API key copied. The secret has been cleared from this page."); }}>Copy key</button><button className="icon-button" aria-label="Hide key" onClick={() => setIssuedKey("")}><X size={16} /></button></div> : null}
+              {inviteToken ? <div className="secret-reveal"><span><strong>One-time invite link</strong><code>{`${window.location.origin}/?invite=${encodeURIComponent(inviteToken)}`}</code></span><button className="secondary" onClick={async () => { await navigator.clipboard.writeText(`${window.location.origin}/?invite=${encodeURIComponent(inviteToken)}`); setInviteToken(""); setNotice("Invitation link copied and cleared from this page."); }}>Copy link</button><button className="icon-button" aria-label="Hide invite link" onClick={() => setInviteToken("")}><X size={16} /></button></div> : null}
+              <div className="key-list">
+                {personalKeys.map((key) => <div className="key-row" key={key.id}><span><strong>{key.label}</strong><small>Created {new Date(key.created_at).toLocaleDateString()}</small></span><span className={`badge ${key.status === "Active" ? "green" : "neutral"}`}>{key.status}</span>{key.status === "Active" ? <button className="text-button danger" onClick={async () => { try { await apiRequest(`/keys/${key.id}`, csrf, { method: "DELETE" }); setIssuedKey(""); await refreshWorkspace(); setNotice("API key revoked. Calls with it are rejected immediately."); } catch (error) { setNotice(error instanceof Error ? error.message : "Could not revoke key."); } }}>Revoke</button> : null}</div>)}
               </div>
               <div className="table-scroll">
                 <table>
@@ -771,7 +873,7 @@ export default function App() {
                     <tr>
                       <th>Member</th>
                       <th>Role</th>
-                      <th>Demo key status</th>
+                      <th>API key status</th>
                       <th>Action</th>
                     </tr>
                   </thead>
@@ -790,31 +892,26 @@ export default function App() {
                         <td>{member.role}</td>
                         <td>
                           <span
-                            className={`badge ${member.key === "Active" ? "green" : "neutral"}`}
+                            className={`badge ${member.key_status === "Active" ? "green" : "neutral"}`}
                           >
-                            {member.key}
+                            {member.key_status}
                           </span>
                         </td>
                         <td>
-                          {member.role === "Admin" ? (
-                            <span className="muted">You</span>
-                          ) : member.key === "Active" ? (
+                          {member.active_keys > 0 ? (
                             <button
-                              className="text-button"
-                              onClick={() => {
-                                setMembers((current) =>
-                                  current.map((m) =>
-                                    m.email === member.email
-                                      ? { ...m, key: "Revoked" }
-                                      : m,
-                                  ),
-                                );
-                                setNotice(
-                                  "Demo key marked revoked. No real API key was changed.",
-                                );
+                              className="text-button danger"
+                              onClick={async () => {
+                                if (!window.confirm(`Revoke all active API keys for ${member.name}?`)) return;
+                                try {
+                                  const keys = await apiRequest<any[]>(`/keys?user_id=${member.id}`, csrf);
+                                  await Promise.all(keys.filter((key) => key.status === "Active").map((key) => apiRequest(`/keys/${key.id}`, csrf, { method: "DELETE" })));
+                                  await refreshWorkspace();
+                                  setNotice(`Active API keys revoked for ${member.name}.`);
+                                } catch (error) { setNotice(error instanceof Error ? error.message : "Could not revoke keys."); }
                               }}
                             >
-                              Revoke demo key
+                              Revoke keys
                             </button>
                           ) : (
                             <span className="muted">—</span>
@@ -832,7 +929,7 @@ export default function App() {
               <div className="panel-heading">
                 <div>
                   <h2>Workspace activity</h2>
-                  <p>Sample tool calls and your preview actions.</p>
+                  <p>Tool calls, rejections and outcomes attributed to their caller.</p>
                 </div>
                 <label className="search">
                   <Search size={16} />
@@ -850,31 +947,30 @@ export default function App() {
           <footer>
             <span>Made for the way your team works.</span>
             <span>
-              Urumi gateway <span className="footer-dot">·</span> Frontend
-              preview
+              Urumi gateway <span className="footer-dot">·</span> Live gateway
             </span>
           </footer>
         </div>
       </main>
-      <dialog ref={dialog} aria-labelledby="dialog-title">
-        <form onSubmit={submitModal}>
+      <dialog ref={dialog} aria-labelledby="dialog-title" onClose={() => setModalOpen(false)}>
+        <form key={`${modal}-${editingServer?.id || "new"}`} onSubmit={submitModal}>
           <div className="modal-heading">
             <h2 id="dialog-title">
-              {modal === "server" ? "Add a connection" : "Invite a teammate"}
+              {modal === "server" ? (editingServer ? "Edit connection" : "Add a connection") : "Invite a teammate"}
             </h2>
             <button
               type="button"
               className="icon-button"
               aria-label="Close dialog"
-              onClick={() => dialog.current?.close()}
+              onClick={() => setModalOpen(false)}
             >
               <X size={19} />
             </button>
           </div>
           <p className="muted">
             {modal === "server"
-              ? "Create a demo entry. Live connections come with the backend."
-              : "Preview a team invitation. No email will be sent."}
+              ? "Register an MCP Streamable HTTP endpoint. The credential is encrypted on the server and never returned to the browser."
+              : "Create a seven-day invitation token. Share it with the teammate through your usual secure channel."}
           </p>
           <label>
             Name
@@ -883,21 +979,23 @@ export default function App() {
               required
               maxLength={60}
               autoFocus
+              defaultValue={modal === "server" ? editingServer?.name : ""}
               placeholder={
                 modal === "server" ? "e.g. Support desk" : "Full name"
               }
             />
           </label>
           {modal === "server" ? (
-            <label>
-              Server URL
-              <input
-                name="url"
-                type="url"
-                required
-                placeholder="https://example.com/mcp"
-              />
-            </label>
+            <>
+              {editingServer ? <p className="muted">Alias <code>{editingServer.alias}</code> stays fixed so tool names and audit history remain stable.</p> : <label>Server alias<input name="alias" maxLength={48} placeholder="e.g. support-desk" /></label>}
+              <label>Description<input name="description" maxLength={240} placeholder="What this MCP server provides" defaultValue={editingServer?.description || ""} /></label>
+              <label>Server URL<input name="url" type="url" required placeholder="https://example.com/mcp" defaultValue={editingServer?.url || ""} /></label>
+              <div className="form-row">
+                <label>Credential header<input name="auth_header" defaultValue={editingServer ? (editingServer.auth_header ?? "") : "Authorization"} /></label>
+                <label>Value prefix<input name="auth_prefix" defaultValue={editingServer?.auth_prefix ?? "Bearer "} /></label>
+              </div>
+              <label>Static credential<input name="credential" type="password" autoComplete="new-password" placeholder={editingServer?.has_credential ? "Leave blank to keep the current credential" : "Optional upstream token"} /></label>
+            </>
           ) : (
             <label>
               Email
@@ -913,14 +1011,14 @@ export default function App() {
             <button
               type="button"
               className="secondary"
-              onClick={() => dialog.current?.close()}
+              onClick={() => setModalOpen(false)}
             >
               Cancel
             </button>
             <button className="primary">
               {modal === "server"
-                ? "Add demo connection"
-                : "Add demo invitation"}
+                ? (editingServer ? "Save changes" : "Register server")
+                : "Create invitation"}
               <ArrowRight size={15} />
             </button>
           </div>

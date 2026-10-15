@@ -36,7 +36,40 @@ gatewayDatabase:
   resources:
     requests: {cpu: 100m, memory: 128Mi}
     limits: {cpu: 500m, memory: 384Mi}
-# No placeholders are deployed for application components still under development.
+gateway:
+  enabled: false
+  image: urumi/gateway:0.2.0
+  imagePullPolicy: IfNotPresent
+  existingSecret: urumi-gateway-app
+  adminEmail: admin@example.test
+  adminName: Workspace Admin
+  dashboardHost: gateway.localhost
+  mcpAllowedHosts: []
+  mcpAllowedOrigins: []
+  tlsSecretName: ""
+  sessionCookieSecure: false
+  resources:
+    requests: {cpu: 200m, memory: 256Mi}
+    limits: {cpu: "1", memory: 768Mi}
+  toolTimeoutSeconds: 20
+  discoveryTimeoutSeconds: 5
+  probeIntervalSeconds: 30
+  apiRpmLimit: 120
+demoMcp:
+  enabled: false
+  image: urumi/demo-mcp:0.2.0
+  imagePullPolicy: IfNotPresent
+  existingSecret: urumi-gateway-app
+  resources:
+    requests: {cpu: 50m, memory: 96Mi}
+    limits: {cpu: 300m, memory: 192Mi}
+dashboard:
+  enabled: false
+  image: urumi/dashboard:0.2.0
+  imagePullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 25m, memory: 32Mi}
+    limits: {cpu: 200m, memory: 128Mi}
 networkPolicy:
   enabled: true
 woocommerceMcp:

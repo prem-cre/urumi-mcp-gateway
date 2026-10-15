@@ -2,7 +2,7 @@
 
 ## Local prerequisites
 
-Docker Desktop must be running. Install Helm, k3d, kubectl and uv. The foundation was developed on Apple Silicon/macOS; cluster images support that architecture. Python dependencies use `uv sync --locked` and Python 3.12. No LLM account is required for the store foundation.
+Docker Desktop must be running. Install Helm, k3d, kubectl, Docker BuildKit and uv. The foundation was developed on Apple Silicon/macOS; cluster images support that architecture. Python dependencies use `uv sync --locked` and Python 3.12. No LLM account is required for the gateway phase.
 
 ```sh
 brew install helm k3d
@@ -29,7 +29,23 @@ Read admin username/password from `.local/credentials.json` privately. Do not pa
 2. Proceed to checkout, enter dummy billing/shipping details, select Cash on delivery and place the order.
 3. Open WooCommerce admin > Orders with the local admin credentials. Confirm the item, total and order status.
 
-The checkout page and admin are real WooCommerce, not gateway mock data. A purchase creates an order in MariaDB. The gateway services and dashboard do not run yet. Outgoing email is not configured; use WooCommerce admin to inspect orders.
+The checkout page and admin are real WooCommerce, not gateway mock data. A purchase creates an order in MariaDB. Outgoing email is not configured; use WooCommerce admin to inspect orders.
+
+## Deploy the gateway locally
+
+After `local-up.sh`, run:
+
+```sh
+./scripts/deploy-gateway.sh
+```
+
+This builds and imports the gateway, dashboard and sample inventory/fulfillment MCP images into k3d. It provisions the WooCommerce MCP credentials if that service is not already installed, then enables all gateway workloads in the same Helm release. The chart runs the Alembic migration in a gateway init container before starting the API. Check the deployment using the dedicated context:
+
+```sh
+KUBECONFIG="$PWD/.local/kubeconfig" kubectl -n urumi get pods,pvc,ingress
+```
+
+Dashboard: `http://gateway.localhost:8080`. MCP URL: `http://gateway.localhost:8080/mcp`. Read the generated admin password from `.local/credentials.json`. Invite a second account and use each account's own key for the external MCP client. The local chart's generated DB and app Secrets are `urumi-gateway-db` and `urumi-gateway-app`; the dedicated WooCommerce MCP runtime uses `urumi-woocommerce-mcp`.
 
 ## What is installed
 
@@ -37,14 +53,17 @@ The checkout page and admin are real WooCommerce, not gateway mock data. A purch
 | --- | --- |
 | WordPress Deployment | one replica, Recreate, HTTP Service and store Ingress; content PVC |
 | MariaDB StatefulSet | internal headless Service; data PVC |
-| PostgreSQL StatefulSet | internal headless Service; separate data PVC, ready for future gateway |
+| PostgreSQL StatefulSet | internal headless Service; separate persistent data PVC for identities, registry, catalog and audits |
+| Gateway Deployment | one replica, internal ClusterIP; `/api`, `/mcp`, liveness and readiness are exposed on the dashboard host through Ingress |
+| Dashboard Deployment | rootless static React workload; same host and ingress as the gateway |
+| Inventory/Fulfillment MCP Deployments | rootless, read-only sample services; ClusterIP and gateway-only ingress policy |
 | Bootstrap Job | bounded 15-minute initialization, UID 33, content PVC, version-pinned WooCommerce |
 | Secrets | database and WordPress admin credentials; existing Secret references in values |
 | NetworkPolicies | default deny for stack pods, explicit DNS/ingress/database/bootstrap paths |
 
 All long-running containers have startup, readiness and liveness probes and resource requests/limits. Completed initialization Jobs do not have server probes; Job completion and activeDeadlineSeconds govern them.
 
-The standard WordPress/MariaDB/PostgreSQL images initialize files with their default entrypoints; these are not claimed as wholly non-root deployments. Custom Python services will be hardened separately. Service-account tokens are not mounted into these workloads.
+The standard WordPress/MariaDB/PostgreSQL images initialize files with their default entrypoints; these are not claimed as wholly non-root deployments. Gateway, dashboard, WooCommerce MCP and sample MCP containers run as non-root, with read-only root filesystems and dropped capabilities. Service-account tokens are not mounted into these workloads.
 
 Local PVCs use k3s local-path storage. Pod restarts preserve data. A bind mount on the agent maps its storage into `.local/storage` on the host; storage on the server node remains in that Docker node. Never delete the cluster as a substitute for restarting pods: cluster deletion can lose volume metadata and server-node data. This setup is not a backup strategy or replicated storage.
 
@@ -69,7 +88,7 @@ Local NetworkPolicies are enforced by the k3s network-policy controller. Inspect
 
 This is the deployment path and configurable values, not a claim that a VPS has already been provisioned. Install a supported, pinned k3s release on your VPS and ensure Traefik and a NetworkPolicy-capable network configuration run. Keep database ports private; expose only HTTP/HTTPS as needed. Configure DNS for the store host.
 
-Use the same chart with `values-prod.yaml`, setting the actual host, URL, storage class and TLS Secret. Supply `urumi-store` and `urumi-gateway-db` Secrets through your deployment process with the keys documented in `scripts/create-secrets.py`. TLS Secret `urumi-store-tls` must exist before ingress TLS works; this phase does not install cert-manager or obtain certificates. Use secure HTTPS URLs for production API credentials.
+Use the same chart with `values-prod.yaml`, setting the actual host, URL, storage class, registry image references and TLS Secrets. Enable `woocommerceMcp.enabled`, `demoMcp.enabled`, `gateway.enabled` and `dashboard.enabled` as appropriate. Supply `urumi-store`, `urumi-woocommerce-mcp`, `urumi-gateway-db` and `urumi-gateway-app` Secrets through your deployment process; do not use the local secret script against a VPS. TLS Secrets `urumi-store-tls` and `urumi-gateway-tls` must exist before ingress TLS works; cert-manager/certificate issuance is not configured. Use secure HTTPS URLs for production store and upstreams.
 
 ```sh
 # Set the kubeconfig to the intended VPS cluster before executing these commands.
@@ -78,10 +97,15 @@ helm upgrade --install urumi charts/platform -n urumi --create-namespace \
   -f charts/platform/values-prod.yaml \
   --set store.host=store.YOUR_DOMAIN \
   --set store.url=https://store.YOUR_DOMAIN \
+  --set gateway.dashboardHost=gateway.YOUR_DOMAIN \
+  --set woocommerceMcp.enabled=true \
+  --set demoMcp.enabled=true \
+  --set gateway.enabled=true \
+  --set dashboard.enabled=true \
   --wait --wait-for-jobs --timeout 20m
 ```
 
-Host, URL, ingress class/TLS, storage class, Secret references, images and resource sizes are configuration changes only. Bootstrap administration changes should be deliberate: existing admin accounts are not silently reset.
+Host, URL, ingress class/TLS, storage class, Secret references, images and resource sizes are configuration changes only. Use images pushed to a registry reachable by the VPS; local `k3d image import` tags are not available there. Bootstrap administration changes should be deliberate: existing admin accounts are not silently reset. This is a production-like deployment recipe, not evidence of a live VPS install or HA service.
 
 ## Upgrades, rollback and backups
 

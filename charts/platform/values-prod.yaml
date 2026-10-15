@@ -9,3 +9,11 @@ store:
   ingress:
     className: traefik
     tlsSecretName: urumi-store-tls
+gateway:
+  dashboardHost: gateway.example.com
+  mcpAllowedHosts:
+    - gateway.example.com
+  mcpAllowedOrigins:
+    - https://gateway.example.com
+  sessionCookieSecure: true
+  tlsSecretName: urumi-gateway-tls

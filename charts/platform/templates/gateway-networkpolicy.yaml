@@ -1,0 +1,35 @@
+{{- if and .Values.gateway.enabled .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-gateway
+spec:
+  podSelector:
+    matchLabels: {app: gateway, instance: {{ .Release.Name }}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {app.kubernetes.io/name: traefik}
+      ports: [{port: 8000, protocol: TCP}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: {app: postgres, instance: {{ .Release.Name }}}
+      ports: [{port: 5432, protocol: TCP}]
+    - to:
+        - podSelector:
+            matchLabels: {app: woocommerce-mcp, instance: {{ .Release.Name }}}
+        - podSelector:
+            matchLabels: {app: inventory-mcp, instance: {{ .Release.Name }}}
+        - podSelector:
+            matchLabels: {app: fulfillment-mcp, instance: {{ .Release.Name }}}
+      ports: [{port: 8000, protocol: TCP}]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24, 192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24, 224.0.0.0/4, 240.0.0.0/4]
+      ports: [{port: 443, protocol: TCP}]
+{{- end }}

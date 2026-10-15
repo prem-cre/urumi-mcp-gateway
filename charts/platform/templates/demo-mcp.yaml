@@ -1,0 +1,79 @@
+{{- if .Values.demoMcp.enabled }}
+{{- range $kind := list "inventory" "fulfillment" }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $.Release.Name }}-{{ $kind }}-mcp
+  labels:
+    {{- include "urumi.labels" $ | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: {{ $kind }}-mcp, instance: {{ $.Release.Name }}}
+  template:
+    metadata:
+      labels: {app: {{ $kind }}-mcp, instance: {{ $.Release.Name }}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: demo-mcp
+          image: {{ $.Values.demoMcp.image | quote }}
+          imagePullPolicy: {{ $.Values.demoMcp.imagePullPolicy }}
+          ports: [{name: http, containerPort: 8000}]
+          env:
+            - {name: DEMO_MCP_KIND, value: {{ $kind | quote }}}
+            - name: DEMO_MCP_GATEWAY_TOKEN
+              valueFrom: {secretKeyRef: {name: {{ $.Values.demoMcp.existingSecret }}, key: demo-upstream-token}}
+            - name: DEMO_MCP_ALLOWED_HOSTS
+              value: {{ toJson (list (printf "%s-%s-mcp:8000" $.Release.Name $kind) (printf "%s-%s-mcp.%s.svc.cluster.local:8000" $.Release.Name $kind $.Release.Namespace)) | quote }}
+          resources:
+            {{- toYaml $.Values.demoMcp.resources | nindent 12 }}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $.Release.Name }}-{{ $kind }}-mcp
+  labels:
+    {{- include "urumi.labels" $ | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {app: {{ $kind }}-mcp, instance: {{ $.Release.Name }}}
+  ports: [{name: http, port: 8000, targetPort: http}]
+{{- if $.Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $.Release.Name }}-{{ $kind }}-mcp
+spec:
+  podSelector:
+    matchLabels: {app: {{ $kind }}-mcp, instance: {{ $.Release.Name }}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: gateway, instance: {{ $.Release.Name }}}
+      ports: [{port: 8000, protocol: TCP}]
+{{- end }}
+{{- end }}
+{{- end }}
