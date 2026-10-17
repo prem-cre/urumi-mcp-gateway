@@ -22,16 +22,17 @@ gateway:
     captureContent: true
     traceContentRetentionDays: 7
   llm:
-    # Configure an OpenAI-compatible API or a reachable local model service.
-    # Keep provider credentials in the urumi-gateway-app Secret.
-    baseUrl: ""
-    model: ""
+    # Gemini's OpenAI-compatible endpoint; key remains in urumi-gateway-app Secret.
+    baseUrl: https://generativelanguage.googleapis.com/v1beta/openai/
+    model: gemini-3.8-flash
     routerModel: ""
-    # Optional aliases through LiteLLM Proxy: cheaper model for simple turns,
-    # stronger model for cross-server or multi-step questions.
-    standardModel: ""
-    complexModel: ""
-    analysisModel: ""
-    providerName: OpenAI-compatible endpoint
-    # Rates in USD per 1M tokens. Unknown models remain visible as unpriced.
-    modelPricing: {}
+    # The deterministic route heuristic remains enabled; both tiers use Flash for the demo.
+    standardModel: gemini-3.8-flash
+    complexModel: gemini-3.8-flash
+    analysisModel: gemini-3.8-flash
+    providerName: Google Gemini API
+    # Published standard rates in USD per 1M tokens; dashboard costs are estimates.
+    modelPricing:
+      gemini-3.8-flash:
+        input_per_million: 0.75
+        output_per_million: 3.75
