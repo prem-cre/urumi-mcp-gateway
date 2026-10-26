@@ -6,7 +6,7 @@ A Python MCP gateway and React dashboard for a Kubernetes-hosted WooCommerce sto
 
 The store, WooCommerce MCP adapter and team gateway control plane/data plane are implemented. The gateway aggregates WooCommerce plus two sample MCP sources through one Streamable HTTP endpoint. It supports admin/member accounts, invitations, individually hashed/revocable API keys, member tool grants, server registry controls, health discovery and attributed audit logs. The live dashboard uses the gateway API.
 
-The dashboard chat/LLM tool loop, first-party Observability page and an on-demand, Lens-inspired trace investigation workflow are implemented. Chat tool calls use the same authenticated MCP gateway path; traces include model/tool steps, token usage, configured-rate cost estimates, latency and model-routing explanations. Admins can define expected behavior and checks, analyze a bounded sample of redacted previews, and review findings linked to source traces. Local values enable preview capture for synthetic demo data; production values disable it. The local cluster currently has no model provider configured, so real usage, cost, routing and investigation runs remain unverified; the store-order demo flow and VPS deployment also remain. Local gateway verification has exercised three-source routing, member permissions, invitations, key revocation, disable filtering, dead-upstream isolation and NetworkPolicy isolation. The architecture and threat model distinguish implemented controls from planned controls.
+The dashboard chat/LLM tool loop, first-party Observability page, on-demand Lens-inspired trace investigations, shared database rate limiting, optional OIDC login, Prometheus metrics and per-upstream circuit breakers are implemented. Chat calls use the same authenticated MCP gateway path; traces include model/tool steps, provider usage where available, configured-rate cost estimates, latency and routing explanations. Local values configure Gemini 3.8 Flash and bounded redacted trace capture for synthetic data; production values disable content capture. On 20 October, User A created product #16 through chat. They ordered it from the visible storefront using COD as order #19 (with an earlier Store API verification order #17), confirmed the order in WooCommerce admin, and asked chat for today's orders; the answer included #19. User B connected through the official MCP Python client using the gateway endpoint and an individual key, saw 10 permitted tools, retrieved today's orders, and checked inventory through a second MCP source. A User B chat prompt also called WooCommerce and inventory. Revoking both test keys caused subsequent MCP requests to receive HTTP 401. Existing local verification covers server disablement, dead-upstream isolation, audit attribution and NetworkPolicy isolation. The PostgreSQL rate limiter passed a concurrent runtime check; automated tests cover OIDC token checks and circuit transitions. The metrics endpoint responds inside the gateway pod, but labeled scraper access has not been verified in local k3d. A real OIDC provider login and live VPS deployment need external provider and infrastructure configuration.
 
 ## Local setup
 
@@ -17,21 +17,24 @@ uv python install 3.12
 uv sync --locked
 ./scripts/local-up.sh
 ./scripts/deploy-gateway.sh
+make check
+make test
+make verify
 ```
 
-The scripts use only `.local/kubeconfig`. `deploy-gateway.sh` builds/imports gateway, dashboard and demo upstream images, ensures the WooCommerce MCP service is deployed, and enables the chart workloads.
+The scripts use only `.local/kubeconfig`. `deploy-gateway.sh` builds/imports gateway, dashboard and demo upstream images, ensures the WooCommerce MCP service is deployed, and enables the chart workloads. Local model/bootstrap values may live in the ignored, mode-0600 `.local/urumi.local.env`; never commit, display or record that file. The User B test API key has been revoked; create a fresh key in the dashboard before reconnecting an MCP client.
 
 - Store: [http://store.localhost:8080](http://store.localhost:8080)
 - Dashboard: [http://gateway.localhost:8080](http://gateway.localhost:8080)
 - MCP endpoint: `http://gateway.localhost:8080/mcp`
 
-If `.localhost` does not resolve in your browser, add `127.0.0.1 store.localhost gateway.localhost` to your local hosts file. Local generated credentials are in ignored `.local/credentials.json`; read them privately and never commit or record that file. The bootstrap admin email is `admin@example.test`.
+If `.localhost` does not resolve in your browser, add `127.0.0.1 store.localhost gateway.localhost` to your local hosts file. The dashboard bootstrap email and password are in ignored `.local/urumi.local.env`; WordPress admin credentials are in ignored `.local/credentials.json`. Read these files privately and never commit or record them. The bootstrap dashboard email is `admin@example.test`.
 
-For the local gateway demo, sign in as the bootstrap admin, invite a second user under **Team**, complete their one-time invite, and generate a separate MCP key from each account. In MCP Inspector, select Streamable HTTP, configure the gateway URL and set `Authorization: Bearer <user-key>`. Never use a real customer or payment credential in the demo store.
+For the local gateway demo, sign in as the bootstrap admin, invite a second user under **Team**, complete their one-time invite, and generate a separate MCP key from the member account. A verified User B demo key is stored privately in ignored `.local/user-b-demo-key`; rotate it from **Team** if you prefer to issue a new one. In MCP Inspector, select Streamable HTTP, configure the gateway URL and set `Authorization: Bearer <user-key>`. Never use a real customer or payment credential in the demo store.
 
 The **Assistant** view sends model-selected calls through the same `/mcp` route, using the logged-in user session and showing the called tools and selected route. Configure its provider URL/model profiles, optional pricing map and Kubernetes Secret key using the chat setup section in [deployment instructions](docs/deployment.md). **Observability** shows team-scoped model usage and estimated costs, latency and ordered traces. Admins can use **Investigations** to compare captured traces with expected behavior, review evidence-backed findings and mark behavior expected/resolved. Content capture is heuristic-redacted and still sensitive; use synthetic demo data. The **Servers** view shows WooCommerce, inventory and fulfillment status/catalogs, grants, and admin controls to register, refresh, enable, disable and remove upstreams. **Team** handles invitations and keys. **Activity** shows outcomes and call duration. Each MCP tool call rechecks live identity, server enablement and grants, and audit intent is committed before dispatch.
 
-See [gateway operations](services/gateway/README.md) for the MCP request path and endpoints. See [deployment instructions](docs/deployment.md) for checkout, Kubernetes resources, local domains and the production-like Helm values path.
+See [gateway operations](services/gateway/README.md) for the MCP request path and endpoints. See [deployment instructions](docs/deployment.md) for checkout, Kubernetes resources, local domains and the production-like Helm values path. [Round 1 verification](docs/verification-round1.md) records the two-user store/chat/external-client flow and remaining engineering checks.
 
 ## Architecture and decisions
 

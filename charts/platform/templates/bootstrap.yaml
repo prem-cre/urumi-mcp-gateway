@@ -20,6 +20,10 @@ data:
   seed.php: |
     <?php
     WC_Install::create_pages();
+    // WooCommerce initializes new stores in private/coming-soon mode; the
+    // assessment requires a publicly reachable demo storefront.
+    update_option('woocommerce_coming_soon', 'no');
+    update_option('woocommerce_store_pages_only', 'no');
     update_option('show_on_front', 'page');
     update_option('page_on_front', (int) get_option('woocommerce_shop_page_id'));
     update_option('woocommerce_store_address', 'Demo street');

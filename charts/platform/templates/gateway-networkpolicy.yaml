@@ -14,6 +14,16 @@ spec:
           podSelector:
             matchLabels: {app.kubernetes.io/name: traefik}
       ports: [{port: 8000, protocol: TCP}]
+    {{- if and .Values.gateway.observability.metricsEnabled .Values.gateway.observability.metricsNamespaceSelectorLabels .Values.gateway.observability.metricsPodSelectorLabels }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              {{- toYaml .Values.gateway.observability.metricsNamespaceSelectorLabels | nindent 14 }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .Values.gateway.observability.metricsPodSelectorLabels | nindent 14 }}
+      ports: [{port: 8000, protocol: TCP}]
+    {{- end }}
   egress:
     - to:
         - podSelector:

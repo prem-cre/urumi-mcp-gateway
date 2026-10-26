@@ -11,6 +11,7 @@ from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 from sqlalchemy import select
 from starlette.requests import Request
 
+from .metrics import MCP_TOOL_CALLS, MCP_TOOL_DURATION
 from .models import DiscoveredTool, ToolAudit, UpstreamServer, now_utc
 from .security import Principal, decrypt_credential
 from .upstreams import (
@@ -234,6 +235,7 @@ def build_mcp_server(sessions, settings, upstreams: UpstreamManager) -> FastMCP:
                     audit.duration_ms = int((time.monotonic() - started) * 1000)
                     audit.completed_at = now_utc()
                 await session.commit()
+                _observe_tool(server.alias, name, outcome, time.monotonic() - started)
                 return clean_result
         except UpstreamTimeoutError as exc:
             if exc.outcome_unknown:
@@ -302,6 +304,9 @@ def build_mcp_server(sessions, settings, upstreams: UpstreamManager) -> FastMCP:
                     if server.enabled and category != "audit_finalization_error":
                         server.status = "unreachable"
             await session.commit()
+        _observe_tool(
+            server.alias if server else "removed", name, outcome, time.monotonic() - started
+        )
         return response
 
     return mcp
@@ -333,6 +338,7 @@ async def _write_audit(
         )
     )
     await session.commit()
+    _observe_tool(server.alias, tool_name, outcome, duration_ms / 1000)
 
 
 async def _record_rejection(
@@ -353,3 +359,11 @@ async def _record_rejection(
             )
         )
         await session.commit()
+
+
+def _observe_tool(server_alias: str, tool_name: str, outcome: str, duration_seconds: float) -> None:
+    # Tool names are stored in the audit database, not metric labels: upstreams are untrusted and
+    # could otherwise create unbounded Prometheus time series.
+    labels = (server_alias[:48], outcome[:24])
+    MCP_TOOL_CALLS.labels(*labels).inc()
+    MCP_TOOL_DURATION.labels(*labels).observe(max(0, duration_seconds))

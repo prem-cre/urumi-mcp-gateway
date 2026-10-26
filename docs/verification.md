@@ -37,6 +37,10 @@ The admin verification follows WooCommerce's redirect between HPOS and legacy or
 
 The network test first verifies DNS against fully qualified service names and ready workloads, then checks denied TCP connections. A DNS lookup failure is a test failure, not evidence of isolation. Temporary verification pods are cleaned up.
 
+## Later gateway/store integration verification
+
+The gateway and store-to-chat workflow were subsequently completed and exercised with two users on 20 October 2026. This supersedes the “remaining later integration work” note below. See [Round 1 live workflow verification](verification-round1.md) for product #16, COD order #19, chat order lookup, User B's external MCP calls, cross-server inventory lookup, key revocation and audit evidence.
+
 ## Limits remaining
 
 - No Python gateway/MCP implementation or React/chat yet; no external MCP client flow yet.

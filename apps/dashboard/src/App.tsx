@@ -233,6 +233,7 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
+  const [oidcEnabled, setOidcEnabled] = useState(false);
   const [loginChecked, setLoginChecked] = useState(false);
   const [inviteAcceptance, setInviteAcceptance] = useState(() => new URLSearchParams(window.location.search).get("invite") || "");
   const [issuedKey, setIssuedKey] = useState("");
@@ -483,6 +484,18 @@ export default function App() {
       setNotice(error instanceof Error ? error.message : "Could not save finding feedback.");
     }
   }
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("auth_error") === "oidc") {
+      setLoginError("Single sign-on could not sign in this account. Check the provider or ask an administrator.");
+      const url = new URL(window.location.href);
+      url.searchParams.delete("auth_error");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    }
+    apiRequest<{ enabled: boolean }>("/auth/oidc/status", "")
+      .then((status) => setOidcEnabled(status.enabled))
+      .catch(() => setOidcEnabled(false));
+  }, []);
 
   useEffect(() => {
     const incomingToken = new URLSearchParams(window.location.search).get("invite");
@@ -776,6 +789,7 @@ export default function App() {
           <label>Password<input name="password" type="password" required autoComplete="current-password" /></label>
           {loginError ? <p className="login-error" role="alert">{loginError}</p> : null}
           <button className="primary full" disabled={busy}>{busy ? "Signing in…" : "Sign in"}<ArrowRight size={15} /></button>
+          {oidcEnabled ? <a className="secondary full" href="/api/auth/oidc/start">Continue with SSO</a> : null}
           <small className="muted">Use the bootstrap admin credentials from your local secret file.</small>
         </form>}
       </div>

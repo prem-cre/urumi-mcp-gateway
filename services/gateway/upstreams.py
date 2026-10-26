@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .config import Settings
+from .metrics import UPSTREAM_CIRCUIT_STATE
 from .models import DiscoveredTool, UpstreamServer, now_utc
 from .security import decrypt_credential, validate_upstream_url
 
@@ -51,6 +53,13 @@ class UpstreamWorker:
     revision: int
     queue: asyncio.Queue
     task: asyncio.Task
+
+
+@dataclass
+class CircuitState:
+    failures: int = 0
+    open_until: float = 0.0
+    half_open: bool = False
 
 
 class UpstreamTimeoutError(Exception):
@@ -105,6 +114,44 @@ class UpstreamManager:
         self._operation_locks: dict[uuid.UUID, asyncio.Lock] = {}
         self._workers: dict[uuid.UUID, UpstreamWorker] = {}
         self._invalidation_tasks: set[asyncio.Task] = set()
+        self._circuits: dict[uuid.UUID, CircuitState] = {}
+
+    def _before_request(self, server: ServerConfig) -> None:
+        state = self._circuits.setdefault(server.id, CircuitState())
+        now = time.monotonic()
+        if state.open_until > now:
+            raise UpstreamCallError(False, "upstream_circuit_open")
+        if state.open_until and not state.half_open:
+            # One serialized probe is allowed after the cooldown. Other calls stay blocked.
+            state.half_open = True
+        elif state.half_open:
+            raise UpstreamCallError(False, "upstream_circuit_half_open")
+
+    def _operation_succeeded(self, server: ServerConfig) -> None:
+        state = self._circuits.get(server.id)
+        if state and state.open_until:
+            UPSTREAM_CIRCUIT_STATE.labels(server.alias, "closed").inc()
+        self._circuits[server.id] = CircuitState()
+
+    def _operation_failed(self, server: ServerConfig, error: Exception) -> None:
+        if isinstance(error, UpstreamBusyError):
+            state = self._circuits.get(server.id)
+            if state and state.half_open:
+                state.half_open = False
+                state.open_until = 0
+            return
+        state = self._circuits.setdefault(server.id, CircuitState())
+        state.failures += 1
+        if state.half_open or state.failures >= self.settings.circuit_breaker_failure_threshold:
+            state.open_until = time.monotonic() + self.settings.circuit_breaker_cooldown_seconds
+            state.half_open = False
+            UPSTREAM_CIRCUIT_STATE.labels(server.alias, "open").inc()
+
+    def _release_half_open(self, server: ServerConfig) -> None:
+        state = self._circuits.get(server.id)
+        if state and state.half_open:
+            state.half_open = False
+            state.open_until = 0
 
     def _operation_lock(self, server_id: uuid.UUID) -> asyncio.Lock:
         return self._operation_locks.setdefault(server_id, asyncio.Lock())
@@ -205,6 +252,7 @@ class UpstreamManager:
                         )
                     else:
                         raise ValueError("unknown_upstream_operation")
+                self._operation_succeeded(server)
                 if not command.future.done():
                     command.future.set_result(result)
             except asyncio.CancelledError:
@@ -223,6 +271,7 @@ class UpstreamManager:
                     )
                 raise
             except Exception as exc:  # noqa: BLE001 - normalize SDK/transport failures for this command.
+                self._operation_failed(server, exc)
                 if stack is not None:
                     await _close_stack(stack)
                     stack = None
@@ -258,6 +307,7 @@ class UpstreamManager:
     async def invalidate_server(self, server_id: uuid.UUID) -> None:
         async with self._operation_lock(server_id):
             await self._stop_worker_locked(server_id)
+            self._circuits.pop(server_id, None)
 
     def schedule_invalidation(self, server_id: uuid.UUID) -> None:
         task = asyncio.create_task(self.invalidate_server(server_id))
@@ -285,8 +335,12 @@ class UpstreamManager:
         command = None
         try:
             async with asyncio.timeout(limit):
+                self._before_request(config)
                 command = await self._enqueue_locked(config, "list_tools", limit)
                 return await asyncio.shield(command.future)
+        except UpstreamBusyError:
+            self._release_half_open(config)
+            raise
         except TimeoutError as exc:
             raise UpstreamTimeoutError(command.dispatched if command else False) from exc
         finally:
@@ -405,10 +459,14 @@ class UpstreamManager:
             async with asyncio.timeout(timeout):
                 await lock.acquire()
                 acquired = True
+                self._before_request(server)
                 command = await self._enqueue_locked(
                     server, "call_tool", timeout, original_name, arguments
                 )
                 return await asyncio.shield(command.future)
+        except UpstreamBusyError:
+            self._release_half_open(server)
+            raise
         except TimeoutError as exc:
             # A timeout while waiting for a session or initializing is known not to have called the tool.
             # Once call_tool has begun, the upstream may have committed a write without returning a reply.

@@ -55,6 +55,13 @@ gateway:
   discoveryTimeoutSeconds: 5
   probeIntervalSeconds: 30
   apiRpmLimit: 120
+  circuitBreaker:
+    failureThreshold: 3
+    cooldownSeconds: 15
+  oidc:
+    issuerUrl: ""
+    clientId: ""
+    redirectUrl: ""
   llm:
     baseUrl: ""
     model: ""
@@ -65,6 +72,9 @@ gateway:
     providerName: OpenAI-compatible endpoint
     modelPricing: {}
   observability:
+    metricsEnabled: true
+    metricsNamespaceSelectorLabels: {}
+    metricsPodSelectorLabels: {}
     captureContent: false
     traceContentRetentionDays: 7
     analysisPollSeconds: 2

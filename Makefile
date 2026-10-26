@@ -1,4 +1,4 @@
-.PHONY: setup up status check verify checkout isolation
+.PHONY: setup up status check test verify checkout isolation
 
 setup:
 	uv python install 3.12
@@ -16,6 +16,9 @@ check:
 	helm lint charts/platform
 	helm template urumi charts/platform -f charts/platform/values-local.yaml >/dev/null
 	helm template urumi charts/platform -f charts/platform/values-prod.yaml >/dev/null
+
+test:
+	uv run pytest services/gateway/tests services/woocommerce_mcp/tests -q
 
 verify:
 	uv run python scripts/verify-store.py

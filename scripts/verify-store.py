@@ -10,6 +10,11 @@ import httpx
 parser = argparse.ArgumentParser()
 parser.add_argument("--checkout", action="store_true", help="Place an actual COD demo order")
 parser.add_argument("--admin-order", type=int, help="Confirm a stored order in the admin page")
+parser.add_argument(
+    "--sku",
+    default="URUMI-DEMO-001",
+    help="Store product SKU to add to the cart (defaults to the seeded demo product)",
+)
 args = parser.parse_args()
 with httpx.Client(
     base_url="http://127.0.0.1:8080",
@@ -20,7 +25,7 @@ with httpx.Client(
     response = client.get("/")
     response.raise_for_status()
     assert "Urumi Demo Store" in response.text, "Store title missing"
-    products = client.get("/wp-json/wc/store/v1/products", params={"sku": "URUMI-DEMO-001"})
+    products = client.get("/wp-json/wc/store/v1/products", params={"sku": args.sku})
     products.raise_for_status()
     product = products.json()[0]
     assert product["is_purchasable"], "Seed product is not purchasable"

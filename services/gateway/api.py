@@ -9,7 +9,9 @@ from decimal import Decimal
 from math import ceil
 from typing import Annotated, Literal
 
-from email_validator import validate_email
+import httpx
+import jwt
+from email_validator import EmailNotValidError, validate_email
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import (
     BaseModel,
@@ -23,6 +25,7 @@ from pydantic import (
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import RedirectResponse
 
 from .chat import ChatNotConfiguredError, ChatObservation, ChatProviderError, run_chat_turn
 from .config import Settings
@@ -40,7 +43,10 @@ from .models import (
     UpstreamServer,
     User,
     WebSession,
+    now_utc,
 )
+from .oidc import authorization_url, read_state_cookie, verified_email
+from .rate_limit import consume_request
 from .security import (
     Principal,
     create_api_key,
@@ -282,6 +288,96 @@ def _server_view(server: UpstreamServer, tools: list[DiscoveredTool], principal:
 def create_api_router() -> APIRouter:
     router = APIRouter(prefix="/api")
 
+    @router.get("/auth/oidc/status")
+    async def oidc_status(request: Request):
+        return {"enabled": request.app.state.settings.oidc_enabled}
+
+    @router.get("/auth/oidc/start")
+    async def oidc_start(request: Request):
+        settings: Settings = request.app.state.settings
+        if not settings.oidc_enabled:
+            raise HTTPException(404, "Single sign-on is not configured.")
+        try:
+            location, state_cookie = await authorization_url(settings)
+        except Exception as exc:
+            raise HTTPException(503, "The identity provider is unavailable.") from exc
+        response = RedirectResponse(location, status_code=302)
+        response.set_cookie(
+            "urumi_oidc_state",
+            state_cookie,
+            httponly=True,
+            secure=settings.session_cookie_secure,
+            samesite="lax",
+            max_age=600,
+            path="/api/auth/oidc",
+        )
+        return response
+
+    @router.get("/auth/oidc/callback")
+    async def oidc_callback(
+        request: Request,
+        db: SessionDep,
+        code: str = "",
+        state: str = "",
+        error: str = "",
+    ):
+        settings: Settings = request.app.state.settings
+        state_value = request.cookies.get("urumi_oidc_state", "")
+        state_payload = read_state_cookie(settings, state_value, state) if state else None
+        redirect = RedirectResponse("/?auth_error=oidc", status_code=303)
+        redirect.delete_cookie("urumi_oidc_state", path="/api/auth/oidc")
+        if not settings.oidc_enabled or error or not code or not state_payload:
+            return redirect
+        try:
+            email = await verified_email(settings, code, state_payload)
+            normalized_email = _normalize_email(email) if email else None
+        except (
+            EmailNotValidError,
+            httpx.HTTPError,
+            jwt.PyJWTError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            return redirect
+        if not normalized_email:
+            return redirect
+        user = await db.scalar(select(User).where(User.email == normalized_email))
+        # OIDC authenticates invited accounts; it does not silently provision users.
+        if user is None or not user.active:
+            return redirect
+        raw_token, csrf, expires = new_session_values(settings)
+        db.add(
+            WebSession(
+                user_id=user.id,
+                token_digest=digest_secret(raw_token, settings.session_pepper.get_secret_value()),
+                csrf_digest=digest_secret(csrf, settings.session_pepper.get_secret_value()),
+                expires_at=expires,
+            )
+        )
+        await db.commit()
+        success = RedirectResponse("/", status_code=303)
+        success.delete_cookie("urumi_oidc_state", path="/api/auth/oidc")
+        success.set_cookie(
+            "urumi_session",
+            raw_token,
+            httponly=True,
+            secure=settings.session_cookie_secure,
+            samesite="strict",
+            max_age=settings.session_ttl_hours * 3600,
+            path="/",
+        )
+        success.set_cookie(
+            "urumi_csrf",
+            csrf,
+            httponly=False,
+            secure=settings.session_cookie_secure,
+            samesite="strict",
+            max_age=settings.session_ttl_hours * 3600,
+            path="/",
+        )
+        return success
+
     @router.post("/auth/login")
     async def login(body: LoginBody, request: Request, response: Response, db: SessionDep):
         email = body.email.lower()
@@ -414,6 +510,7 @@ def create_api_router() -> APIRouter:
     async def chat(
         body: ChatBody,
         request: Request,
+        response: Response,
         principal: SessionUser,
         db: SessionDep,
     ):
@@ -421,6 +518,34 @@ def create_api_router() -> APIRouter:
         from .security import create_chat_assertion
 
         settings: Settings = request.app.state.settings
+        allowed, remaining, reset_seconds = await consume_request(
+            request.app.state.sessions, principal, settings.api_rpm_limit
+        )
+        if not allowed:
+            db.add(
+                ToolAudit(
+                    correlation_id=str(uuid.uuid4()),
+                    user_id=principal.user_id,
+                    user_email=principal.email,
+                    outcome="denied",
+                    error_category="rate_limited",
+                    duration_ms=0,
+                    completed_at=now_utc(),
+                )
+            )
+            await db.commit()
+            raise HTTPException(
+                429,
+                "Gateway request rate limit exceeded.",
+                headers={
+                    "RateLimit-Limit": str(settings.api_rpm_limit),
+                    "RateLimit-Remaining": "0",
+                    "RateLimit-Reset": str(reset_seconds),
+                },
+            )
+        response.headers["RateLimit-Limit"] = str(settings.api_rpm_limit)
+        response.headers["RateLimit-Remaining"] = str(remaining)
+        response.headers["RateLimit-Reset"] = str(reset_seconds)
         assertion = create_chat_assertion(principal, settings)
         trace = AgentTrace(
             user_id=principal.user_id,

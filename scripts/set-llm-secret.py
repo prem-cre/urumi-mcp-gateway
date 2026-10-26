@@ -13,7 +13,9 @@ os.environ["KUBECONFIG"] = str(ROOT / ".local" / "kubeconfig")
 if not Path(os.environ["KUBECONFIG"]).is_file():
     raise SystemExit("Missing .local/kubeconfig; run scripts/local-up.sh first.")
 
-credential = getpass.getpass("LLM provider API key (input hidden): ").strip()
+credential = os.environ.get("URUMI_LLM_API_KEY", "").strip()
+if not credential:
+    credential = getpass.getpass("LLM provider API key (input hidden): ").strip()
 if not credential:
     raise SystemExit("No key entered; the Kubernetes Secret was not changed.")
 
@@ -47,6 +49,4 @@ try:
     )
 except subprocess.CalledProcessError as exc:
     raise SystemExit("Could not update the LLM key in Kubernetes.") from exc
-print(
-    "LLM provider key stored in urumi/urumi-gateway-app; the key was not printed or saved to disk."
-)
+print("LLM provider key applied to urumi/urumi-gateway-app without printing its value.")

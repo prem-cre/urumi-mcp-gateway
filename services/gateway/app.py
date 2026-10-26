@@ -2,9 +2,7 @@
 
 import asyncio
 import logging
-import time
 import uuid
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -19,7 +17,9 @@ from .config import Settings
 from .db import make_database
 from .investigations import investigation_worker
 from .mcp_gateway import build_mcp_server
+from .metrics import HTTP_DURATION, HTTP_REQUESTS, prometheus_response
 from .models import ApiKey, ToolAudit, User, now_utc
+from .rate_limit import consume_request
 from .security import authenticate_api_key, authenticate_chat_assertion
 from .upstreams import UpstreamManager
 
@@ -33,7 +33,6 @@ class MCPKeyMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.sessions = sessions
         self.settings = settings
-        self.request_times: dict[str, deque[float]] = defaultdict(deque)
 
     async def dispatch(self, request, call_next):
         path = request.url.path
@@ -75,22 +74,28 @@ class MCPKeyMiddleware(BaseHTTPMiddleware):
                     status_code=401,
                     headers={"WWW-Authenticate": "Bearer"},
                 )
-        now = time.monotonic()
-        rate_key = principal.key_id or f"user:{principal.user_id}"
-        window = self.request_times[rate_key]
-        while window and window[0] <= now - 60:
-            window.popleft()
-        if len(window) >= self.settings.api_rpm_limit:
+        allowed, remaining, reset_seconds = await consume_request(
+            self.sessions, principal, self.settings.api_rpm_limit
+        )
+        if not allowed:
             await self._audit_rejection(
                 principal.user_id, principal.key_id, "rate_limited", principal.email
             )
             return JSONResponse(
                 {"error": "rate_limited", "message": "Gateway request rate limit exceeded."},
                 status_code=429,
+                headers={
+                    "RateLimit-Limit": str(self.settings.api_rpm_limit),
+                    "RateLimit-Remaining": "0",
+                    "RateLimit-Reset": str(reset_seconds),
+                },
             )
-        window.append(now)
         request.scope.setdefault("state", {})["principal"] = principal
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers.setdefault("RateLimit-Limit", str(self.settings.api_rpm_limit))
+        response.headers.setdefault("RateLimit-Remaining", str(remaining))
+        response.headers.setdefault("RateLimit-Reset", str(reset_seconds))
+        return response
 
     async def _audit_rejection(self, user_id, key_id, category: str, email: str | None = None):
         try:
@@ -181,6 +186,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(MCPKeyMiddleware, sessions=sessions, settings=settings)
     app.include_router(create_api_router())
 
+    @app.middleware("http")
+    async def record_http_metrics(request, call_next):
+        path = request.url.path
+        route = (
+            "/mcp"
+            if path == "/mcp" or path.startswith("/mcp/")
+            else "/api"
+            if path == "/api" or path.startswith("/api/")
+            else path
+            if path in {"/healthz", "/readyz", "/metrics"}
+            else "other"
+        )
+        started = asyncio.get_running_loop().time()
+        status = "500"
+        try:
+            response = await call_next(request)
+            status = str(response.status_code)
+            return response
+        finally:
+            HTTP_REQUESTS.labels(route, request.method, status).inc()
+            HTTP_DURATION.labels(route, request.method).observe(
+                asyncio.get_running_loop().time() - started
+            )
+
     @app.get("/healthz", include_in_schema=False)
     async def healthz():
         return {"status": "alive"}
@@ -193,6 +222,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except SQLAlchemyError:
             return JSONResponse({"status": "not_ready"}, status_code=503)
         return {"status": "ready"}
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics():
+        if not settings.metrics_enabled:
+            return JSONResponse({"detail": "Not found"}, status_code=404)
+        return prometheus_response()
 
     app.mount("/", mcp.streamable_http_app())
     return app

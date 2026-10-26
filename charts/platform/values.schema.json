@@ -98,13 +98,31 @@
         "mcpAllowedOrigins": {"type": "array", "items": {"type": "string"}},
         "tlsSecretName": {"type": "string"},
         "sessionCookieSecure": {"type": "boolean"},
+        "oidc": {
+          "type": "object",
+          "properties": {
+            "issuerUrl": {"type": "string", "pattern": "^$|^https://"},
+            "clientId": {"type": "string"},
+            "redirectUrl": {"type": "string", "pattern": "^$|^https://|^http://localhost(:[0-9]+)?/|^http://([A-Za-z0-9-]+\\.)+localhost(:[0-9]+)?/"}
+          }
+        },
         "toolTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
         "discoveryTimeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 30},
         "probeIntervalSeconds": {"type": "integer", "minimum": 5},
         "apiRpmLimit": {"type": "integer", "minimum": 1},
+        "circuitBreaker": {
+          "type": "object",
+          "properties": {
+            "failureThreshold": {"type": "integer", "minimum": 1, "maximum": 20},
+            "cooldownSeconds": {"type": "number", "minimum": 1, "maximum": 300}
+          }
+        },
         "observability": {
           "type": "object",
           "properties": {
+            "metricsEnabled": {"type": "boolean"},
+            "metricsNamespaceSelectorLabels": {"type": "object", "additionalProperties": {"type": "string"}},
+            "metricsPodSelectorLabels": {"type": "object", "additionalProperties": {"type": "string"}},
             "captureContent": {"type": "boolean"},
             "traceContentRetentionDays": {"type": "integer", "minimum": 1, "maximum": 30},
             "analysisPollSeconds": {"type": "number", "minimum": 1, "maximum": 30},

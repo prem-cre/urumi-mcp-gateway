@@ -69,8 +69,15 @@ class SessionStub:
         return None
 
 
-async def mcp_client_for(key: ApiKey, user: User, key_secret: str, config: Settings):
+async def mcp_client_for(key: ApiKey, user: User, key_secret: str, config: Settings, monkeypatch):
     sessions_created: list[SessionStub] = []
+
+    async def allow_rate_limited_request(*_args, **_kwargs):
+        return True, config.api_rpm_limit - 1, 60
+
+    # These tests exercise API-key authentication. Rate limiting has its own
+    # PostgreSQL-backed session dependency, so keep that concern out of this stub.
+    monkeypatch.setattr("services.gateway.app.consume_request", allow_rate_limited_request)
 
     @asynccontextmanager
     async def sessions():
@@ -92,7 +99,7 @@ async def mcp_client_for(key: ApiKey, user: User, key_secret: str, config: Setti
 
 
 @pytest.mark.asyncio
-async def test_revoked_key_is_rejected_and_audited():
+async def test_revoked_key_is_rejected_and_audited(monkeypatch):
     config = settings()
     user_id = uuid.uuid4()
     secret = "client-key-secret"
@@ -106,7 +113,9 @@ async def test_revoked_key_is_rejected_and_audited():
         id=user_id, email="member@example.test", display_name="Member", role="member", active=True
     )
 
-    response, sessions = await mcp_client_for(key, user, f"urm_{key.id}.{secret}", config)
+    response, sessions = await mcp_client_for(
+        key, user, f"urm_{key.id}.{secret}", config, monkeypatch
+    )
 
     assert response.status_code == 401
     assert response.json()["error"] == "unauthorized"
@@ -116,7 +125,7 @@ async def test_revoked_key_is_rejected_and_audited():
 
 
 @pytest.mark.asyncio
-async def test_active_key_authenticates_the_database_principal():
+async def test_active_key_authenticates_the_database_principal(monkeypatch):
     config = settings()
     user_id = uuid.uuid4()
     secret = "client-key-secret"
@@ -129,7 +138,7 @@ async def test_active_key_authenticates_the_database_principal():
         id=user_id, email="member@example.test", display_name="Member", role="member", active=True
     )
 
-    response, _ = await mcp_client_for(key, user, f"urm_{key.id}.{secret}", config)
+    response, _ = await mcp_client_for(key, user, f"urm_{key.id}.{secret}", config, monkeypatch)
 
     assert response.status_code == 200
     assert response.json() == {"user": "member@example.test"}
@@ -251,8 +260,13 @@ async def test_chat_assertion_rejects_modified_signature_and_expired_session():
 
 
 @pytest.mark.asyncio
-async def test_mcp_middleware_accepts_chat_assertion_as_the_live_database_user():
+async def test_mcp_middleware_accepts_chat_assertion_as_the_live_database_user(monkeypatch):
     config = settings()
+
+    async def allow_rate_limited_request(*_args, **_kwargs):
+        return True, config.api_rpm_limit - 1, 60
+
+    monkeypatch.setattr("services.gateway.app.consume_request", allow_rate_limited_request)
     user_id = uuid.uuid4()
     session_id = uuid.uuid4()
     user = User(

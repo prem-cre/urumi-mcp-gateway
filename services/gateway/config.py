@@ -1,6 +1,8 @@
 """Environment-backed gateway configuration."""
 
-from pydantic import Field, SecretStr, field_validator
+from urllib.parse import urlsplit
+
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,6 +42,13 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = False
     session_ttl_hours: int = 12
     api_rpm_limit: int = 120
+    oidc_issuer_url: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: SecretStr | None = None
+    oidc_redirect_url: str = ""
+    circuit_breaker_failure_threshold: int = Field(default=3, ge=1, le=20)
+    circuit_breaker_cooldown_seconds: float = Field(default=15, ge=1, le=300)
+    metrics_enabled: bool = True
     probe_interval_seconds: int = 30
     discovery_timeout_seconds: float = 5
     tool_timeout_seconds: float = 20
@@ -72,3 +81,32 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_email(cls, value: str) -> str:
         return value.strip().lower()
+
+    @property
+    def oidc_enabled(self) -> bool:
+        return bool(self.oidc_issuer_url and self.oidc_client_id and self.oidc_redirect_url)
+
+    @model_validator(mode="after")
+    def validate_oidc_configuration(self):
+        configured = bool(self.oidc_issuer_url or self.oidc_client_id or self.oidc_redirect_url)
+        if configured and not self.oidc_enabled:
+            raise ValueError(
+                "OIDC issuer URL, client ID and redirect URL must be configured together"
+            )
+        if not self.oidc_enabled:
+            return self
+        issuer = urlsplit(self.oidc_issuer_url)
+        redirect = urlsplit(self.oidc_redirect_url)
+        if issuer.scheme != "https" or not issuer.hostname or issuer.username or issuer.password:
+            raise ValueError("OIDC issuer URL must be an HTTPS URL without embedded credentials")
+        local_http = redirect.hostname in {"localhost", "gateway.localhost"} or bool(
+            redirect.hostname and redirect.hostname.endswith(".localhost")
+        )
+        if (
+            (redirect.scheme != "https" and not (redirect.scheme == "http" and local_http))
+            or not redirect.hostname
+            or redirect.username
+            or redirect.password
+        ):
+            raise ValueError("OIDC redirect URL must use HTTPS (or a local .localhost URL)")
+        return self

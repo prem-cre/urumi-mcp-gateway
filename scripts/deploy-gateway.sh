@@ -3,8 +3,19 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export KUBECONFIG="$PWD/.local/kubeconfig"
 test -f "$KUBECONFIG" || { echo "Missing .local/kubeconfig; run scripts/local-up.sh first." >&2; exit 1; }
+local_env="$PWD/.local/urumi.local.env"
+if [[ -f "$local_env" ]]; then
+  chmod 600 "$local_env"
+  set -a
+  # This ignored, owner-only file is created locally for development credentials.
+  source "$local_env"
+  set +a
+fi
 
 python3 scripts/create-secrets.py
+if [[ -n "${URUMI_LLM_API_KEY:-}" ]]; then
+  python3 scripts/set-llm-secret.py
+fi
 if ! kubectl -n urumi get deployment urumi-woocommerce-mcp >/dev/null 2>&1; then
   ./scripts/deploy-mcp.sh
 fi
@@ -16,6 +27,10 @@ dashboard_image="urumi/dashboard:$tag"
 # Keep one sentinel element so Bash with `set -u` can safely expand the array
 # when no command-line LLM overrides are provided. Slice it off at the Helm call.
 llm_args=("")
+admin_args=("")
+if [[ -n "${URUMI_ADMIN_EMAIL:-}" ]]; then
+  admin_args+=(--set-string "gateway.adminEmail=$URUMI_ADMIN_EMAIL")
+fi
 if [[ -n "${URUMI_LLM_BASE_URL:-}" || -n "${URUMI_LLM_MODEL:-}" || -n "${URUMI_LLM_ROUTER_MODEL:-}" || -n "${URUMI_LLM_STANDARD_MODEL:-}" || -n "${URUMI_LLM_COMPLEX_MODEL:-}" || -n "${URUMI_LLM_ANALYSIS_MODEL:-}" ]]; then
   [[ -n "${URUMI_LLM_BASE_URL:-}" ]] || {
     echo "Set URUMI_LLM_BASE_URL when configuring a model, or leave all model variables empty." >&2
@@ -53,6 +68,7 @@ helm upgrade --install urumi charts/platform -n urumi \
   --set-string gateway.image="$gateway_image" \
   --set-string dashboard.image="$dashboard_image" \
   "${llm_args[@]:1}" \
+  "${admin_args[@]:1}" \
   --wait --wait-for-jobs --timeout 10m
 
 kubectl -n urumi rollout status deployment/urumi-gateway --timeout=180s

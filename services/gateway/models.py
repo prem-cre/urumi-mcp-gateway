@@ -68,6 +68,16 @@ class WebSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
 
 
+class RateLimitBucket(Base):
+    """One atomic fixed-window counter per gateway user/key, shared by all replicas."""
+
+    __tablename__ = "gateway_rate_limit_buckets"
+
+    key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_start: Mapped[int] = mapped_column(Integer)
+    request_count: Mapped[int] = mapped_column(Integer)
+
+
 class Invitation(Base):
     __tablename__ = "invitations"
 

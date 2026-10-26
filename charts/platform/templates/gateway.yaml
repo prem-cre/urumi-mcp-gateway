@@ -81,8 +81,26 @@ spec:
               value: {{ toJson .Values.gateway.mcpAllowedOrigins | quote }}
             - name: GATEWAY_SESSION_COOKIE_SECURE
               value: {{ .Values.gateway.sessionCookieSecure | quote }}
+            - name: GATEWAY_OIDC_ISSUER_URL
+              value: {{ .Values.gateway.oidc.issuerUrl | quote }}
+            - name: GATEWAY_OIDC_CLIENT_ID
+              value: {{ .Values.gateway.oidc.clientId | quote }}
+            - name: GATEWAY_OIDC_REDIRECT_URL
+              value: {{ .Values.gateway.oidc.redirectUrl | quote }}
+            - name: GATEWAY_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.gateway.existingSecret }}
+                  key: oidc-client-secret
+                  optional: true
             - name: GATEWAY_API_RPM_LIMIT
               value: {{ .Values.gateway.apiRpmLimit | quote }}
+            - name: GATEWAY_CIRCUIT_BREAKER_FAILURE_THRESHOLD
+              value: {{ .Values.gateway.circuitBreaker.failureThreshold | quote }}
+            - name: GATEWAY_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+              value: {{ .Values.gateway.circuitBreaker.cooldownSeconds | quote }}
+            - name: GATEWAY_METRICS_ENABLED
+              value: {{ .Values.gateway.observability.metricsEnabled | quote }}
             - name: GATEWAY_TOOL_TIMEOUT_SECONDS
               value: {{ .Values.gateway.toolTimeoutSeconds | quote }}
             - name: GATEWAY_DISCOVERY_TIMEOUT_SECONDS
@@ -150,6 +168,12 @@ metadata:
   name: {{ .Release.Name }}-gateway
   labels:
     {{- include "urumi.labels" . | nindent 4 }}
+  {{- if .Values.gateway.observability.metricsEnabled }}
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "8000"
+  {{- end }}
 spec:
   type: ClusterIP
   selector: {app: gateway, instance: {{ .Release.Name }}}
